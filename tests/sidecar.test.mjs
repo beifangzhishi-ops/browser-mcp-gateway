@@ -650,12 +650,14 @@ test('Funnel ownership and lifecycle scripts stay narrowly scoped', () => {
   assert.doesNotMatch(stop, /Stop-Process\s+-Name/iu);
   assert.doesNotMatch(stop, /taskkill/iu);
   assert.doesNotMatch(stop, /node\.exe|msedge\.exe/iu);
-  assert.match(installAutostart, /GetFolderPath\("Startup"\)/u);
-  assert.match(installAutostart, /CreateShortcut/u);
+  assert.match(installAutostart, /New-ScheduledTaskTrigger\s+-AtLogOn/iu);
+  assert.match(installAutostart, /Register-ScheduledTask/iu);
+  assert.match(installAutostart, /RestartCount\s+3/iu);
   assert.match(installAutostart, /start\.ps1/iu);
-  assert.doesNotMatch(installAutostart, /tailscale|funnel|schtasks|Register-ScheduledTask|RunAs|12306|msedge/iu);
+  assert.doesNotMatch(installAutostart, /tailscale|funnel|RunAs|12306|msedge/iu);
+  assert.match(uninstallAutostart, /Unregister-ScheduledTask/iu);
   assert.match(uninstallAutostart, /BMG Sidecar\.lnk/u);
-  assert.doesNotMatch(uninstallAutostart, /tailscale|funnel|schtasks|Register-ScheduledTask|Stop-Process|taskkill/iu);
+  assert.doesNotMatch(uninstallAutostart, /tailscale|funnel|Stop-Process|taskkill/iu);
 });
 
 test('configuration rejects reserved ports and keeps the production upstream fixed', () => {

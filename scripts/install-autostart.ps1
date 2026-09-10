@@ -6,24 +6,33 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = $script:BmgRepoRoot
 $startScript = Join-Path $PSScriptRoot "start.ps1"
-$startupDir = [Environment]::GetFolderPath("Startup")
-if ([string]::IsNullOrWhiteSpace($startupDir)) {
-    throw "Unable to resolve the current user's Startup folder."
-}
 if (-not (Test-Path -LiteralPath $startScript)) {
     throw "BMG start script is missing: $startScript"
 }
 
-$shortcutPath = Join-Path $startupDir "BMG Sidecar.lnk"
+$taskName = "BMG Sidecar"
 $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $powershellPath
-$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`""
-$shortcut.WorkingDirectory = $repoRoot
-$shortcut.WindowStyle = 7
-$shortcut.Description = "Start BMG sidecar at user sign-in."
-$shortcut.Save()
+$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$action = New-ScheduledTaskAction -Execute $powershellPath `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`"" `
+    -WorkingDirectory $repoRoot
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+$task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+    -Description "Start the BMG browser MCP sidecar at user logon; retry startup failures."
+Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
 
-Write-Output "BMG autostart installed for the current user."
-Write-Output "Shortcut: $shortcutPath"
+$startupDir = [Environment]::GetFolderPath("Startup")
+if (-not [string]::IsNullOrWhiteSpace($startupDir)) {
+    $legacyShortcut = Join-Path $startupDir "BMG Sidecar.lnk"
+    if (Test-Path -LiteralPath $legacyShortcut) {
+        Remove-Item -LiteralPath $legacyShortcut -Force
+        Write-Output "Removed legacy Startup shortcut: $legacyShortcut"
+    }
+}
+
+Write-Output "BMG autostart scheduled task installed for the current user."
+Write-Output "Task: $taskName"

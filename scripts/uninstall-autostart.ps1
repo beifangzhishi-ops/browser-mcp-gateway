@@ -2,14 +2,20 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$startupDir = [Environment]::GetFolderPath("Startup")
-if ([string]::IsNullOrWhiteSpace($startupDir)) {
-    throw "Unable to resolve the current user's Startup folder."
-}
-$shortcutPath = Join-Path $startupDir "BMG Sidecar.lnk"
-if (Test-Path -LiteralPath $shortcutPath) {
-    Remove-Item -LiteralPath $shortcutPath -Force
-    Write-Output "BMG autostart removed: $shortcutPath"
+$taskName = "BMG Sidecar"
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($null -ne $task) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Write-Output "BMG scheduled autostart removed: $taskName"
 } else {
-    Write-Output "BMG autostart was not installed."
+    Write-Output "BMG scheduled autostart was not installed."
+}
+
+$startupDir = [Environment]::GetFolderPath("Startup")
+if (-not [string]::IsNullOrWhiteSpace($startupDir)) {
+    $legacyShortcut = Join-Path $startupDir "BMG Sidecar.lnk"
+    if (Test-Path -LiteralPath $legacyShortcut) {
+        Remove-Item -LiteralPath $legacyShortcut -Force
+        Write-Output "Removed legacy Startup shortcut: $legacyShortcut"
+    }
 }
