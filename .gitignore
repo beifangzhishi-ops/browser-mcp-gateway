@@ -1,0 +1,10 @@
+upstream/
+extension/
+.cache/
+logs/
+.state/
+config/.env
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

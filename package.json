@@ -1,0 +1,14 @@
+{
+  "name": "browser-mcp-gateway",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Browser MCP Gateway 的独立 OAuth sidecar",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node tests/sidecar.test.mjs"
+  }
+}

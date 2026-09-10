@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse PowerShell scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem -Path scripts -Filter *.ps1 -File | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "Parse errors in $($_.Name):"
+              $errors | ForEach-Object { Write-Host $_.Message }
+            }
+          }
+          if ($failed) { throw "PowerShell syntax validation failed." }
+
+      - name: Validate pinned upstream metadata
+        shell: powershell
+        run: |
+          $setup = Get-Content scripts/setup.ps1 -Raw
+          if ($setup -notmatch 'mcp-chrome-bridge@\$bridgeVersion') { throw 'Bridge install pin missing.' }
+          if ($setup -notmatch 'f48e71751e00bc09725c7e173423cff4f2ccd12a') { throw 'Upstream commit pin missing.' }
+          if ($setup -notmatch 'e0f7edfe84b64fd452deec048fc202cfa33585943da63a06c08e2bbc97770f6a') { throw 'Extension SHA256 pin missing.' }
+
+      - name: Validate automatic proxy support
+        shell: powershell
+        run: |
+          $setup = Get-Content scripts/setup.ps1 -Raw
+          if ($setup -notmatch 'GetSystemWebProxy') { throw 'Windows system proxy discovery missing.' }
+          if ($setup -notmatch 'BROWSER_MCP_PROXY') { throw 'Explicit proxy environment override missing.' }
+          if ($setup -notmatch 'NPM_CONFIG_HTTPS_PROXY') { throw 'npm proxy handoff missing.' }
+          if ($setup -notmatch 'GetProxy\(\$targetUri\)') { throw 'npm target-specific proxy resolution missing.' }
+
+      - name: Validate BMG Funnel ownership
+        shell: powershell
+        run: |
+          $paths = @(
+            '/bmg/mcp',
+            '/bmg/authorize',
+            '/bmg/token',
+            '/bmg/register',
+            '/bmg/revoke',
+            '/bmg/oauth/consent',
+            '/.well-known/oauth-authorization-server/bmg',
+            '/.well-known/oauth-protected-resource/bmg/mcp',
+            '/bmg/.well-known/oauth-authorization-server',
+            '/bmg/mcp/.well-known/oauth-protected-resource'
+          )
+          foreach ($name in @('configure-funnel.ps1', 'disable-funnel.ps1')) {
+            $text = Get-Content ("scripts/" + $name) -Raw
+            foreach ($path in $paths) {
+              if ($text -notmatch [regex]::Escape('"' + $path + '"')) { throw "$name missing $path." }
+            }
+            if ($text -match '(?i)funnel\s+reset|--https=443\s+off|/cam|/v1|8443') {
+              throw "$name contains an out-of-scope Funnel operation."
+            }
+          }
+
+      - name: Run BMG sidecar tests
+        shell: powershell
+        run: |
+          node --check sidecar/config.mjs
+          node --check sidecar/oauth.mjs
+          node --check sidecar/server.mjs
+          npm test

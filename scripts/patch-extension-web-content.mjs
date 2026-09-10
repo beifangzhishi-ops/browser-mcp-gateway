@@ -1,0 +1,133 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const MARKER = 'BMG_WEB_CONTENT_FALLBACK_V1';
+const INTERACTIVE_MARKER = 'BMG_INTERACTIVE_WORKSPACE_TARGET_V1';
+const CLASS_ANCHOR = '  class WebFetcherTool extends BaseBrowserToolExecutor {';
+const HELPER_OLD = "const pingActions = ['search_tabs_content_ping', 'chrome_web_fetcher_ping'];";
+const HELPER_NEW =
+  "const pingActions = ['search_tabs_content_ping', 'chrome_web_fetcher_ping', 'chrome_get_web_content_ping'];";
+
+const HTML_CALL_OLD = `const htmlResponse = yield this.sendMessageToTab(tab.id, {
+              action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_HTML_CONTENT,
+              selector
+            });`;
+const HTML_CALL_NEW = `const htmlResponse = yield webContentMessageWithFallback(
+              this, tab.id, TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_HTML_CONTENT, selector, true
+            );`;
+
+const TEXT_CALL_OLD = `const textResponse = yield this.sendMessageToTab(tab.id, {
+              action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_TEXT_CONTENT,
+              selector
+            });`;
+const TEXT_CALL_NEW = `const textResponse = yield webContentMessageWithFallback(
+              this, tab.id, TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_TEXT_CONTENT, selector, false
+            );`;
+const INTERACTIVE_ARGS_OLD = 'const { textQuery, selector, includeCoordinates = true, types } = args;';
+const INTERACTIVE_ARGS_NEW =
+  'const { textQuery, selector, includeCoordinates = true, types, tabId: explicitTabId, windowId } = args;';
+const INTERACTIVE_TAB_OLD = `          const tabs = yield chrome.tabs.query({ active: true, currentWindow: true });
+          if (!tabs[0]) {
+            return createErrorResponse("No active tab found");
+          }
+          const tab = tabs[0];`;
+const INTERACTIVE_TAB_NEW = `          // ${INTERACTIVE_MARKER}
+          let tab;
+          if (typeof explicitTabId === "number") {
+            tab = yield chrome.tabs.get(explicitTabId);
+          } else {
+            const tabs = typeof windowId === "number"
+              ? yield chrome.tabs.query({ active: true, windowId })
+              : yield chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tabs[0]) {
+              return createErrorResponse("No active tab found");
+            }
+            tab = tabs[0];
+          }`;
+const FALLBACK_HELPER = `  // ${MARKER}
+  function webContentMessageWithFallback(tool, tabId, action, selector, asHtml) {
+    return __async(this, null, function* () {
+      try {
+        return yield Promise.race([
+          tool.sendMessageToTab(tabId, { action, selector }),
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error("web content helper timeout")),
+            1500
+          ))
+        ]);
+      } catch (_error) {
+        const results = yield chrome.scripting.executeScript({
+          target: { tabId },
+          func: (targetSelector, htmlMode) => {
+            const node = targetSelector
+              ? document.querySelector(targetSelector)
+              : htmlMode ? document.documentElement : document.body;
+            if (!node) return { success: false, error: "Target content was not found" };
+            if (htmlMode) {
+              const value = targetSelector ? node.outerHTML : document.documentElement.outerHTML;
+              return { success: true, htmlContent: value.slice(0, 1000000), fallback: true };
+            }
+            const value = node.innerText || node.textContent || "";
+            return { success: true, textContent: value.slice(0, 200000), fallback: true };
+          },
+          args: [selector ?? null, asHtml]
+        });
+        const fallback = results && results[0] ? results[0].result : null;
+        return fallback || { success: false, error: "Direct web content fallback failed" };
+      }
+    });
+  }
+`;
+
+function replaceExactlyOnce(text, oldText, newText, label) {
+  const first = text.indexOf(oldText);
+  if (first < 0) throw new Error(`${label} anchor was not found`);
+  if (text.indexOf(oldText, first + oldText.length) >= 0) {
+    throw new Error(`${label} anchor matched more than once`);
+  }
+  return text.slice(0, first) + newText + text.slice(first + oldText.length);
+}
+
+export function patchWebContentBackgroundText(text) {
+  let next = text;
+  let changed = false;
+  if (!next.includes(MARKER)) {
+    next = replaceExactlyOnce(next, CLASS_ANCHOR, FALLBACK_HELPER + CLASS_ANCHOR, 'class');
+    next = replaceExactlyOnce(next, HTML_CALL_OLD, HTML_CALL_NEW, 'html call');
+    next = replaceExactlyOnce(next, TEXT_CALL_OLD, TEXT_CALL_NEW, 'text call');
+    changed = true;
+  }
+  if (!next.includes(INTERACTIVE_MARKER)) {
+    next = replaceExactlyOnce(next, INTERACTIVE_ARGS_OLD, INTERACTIVE_ARGS_NEW, 'interactive args');
+    next = replaceExactlyOnce(next, INTERACTIVE_TAB_OLD, INTERACTIVE_TAB_NEW, 'interactive tab');
+    changed = true;
+  }
+  return { text: next, changed };
+}
+
+export function patchWebContentHelperText(text) {
+  if (text.includes('chrome_get_web_content_ping')) return { text, changed: false };
+  return { text: replaceExactlyOnce(text, HELPER_OLD, HELPER_NEW, 'helper ping'), changed: true };
+}
+export function patchExtensionWebContent(extensionDir) {
+  const backgroundPath = path.join(extensionDir, 'background.js');
+  const helperPath = path.join(extensionDir, 'inject-scripts', 'web-fetcher-helper.js');
+  const background = fs.readFileSync(backgroundPath, 'utf8');
+  const helper = fs.readFileSync(helperPath, 'utf8');
+  const patchedBackground = patchWebContentBackgroundText(background);
+  const patchedHelper = patchWebContentHelperText(helper);
+  if (patchedBackground.changed) fs.writeFileSync(backgroundPath, patchedBackground.text, 'utf8');
+  if (patchedHelper.changed) fs.writeFileSync(helperPath, patchedHelper.text, 'utf8');
+  return { backgroundChanged: patchedBackground.changed, helperChanged: patchedHelper.changed };
+}
+
+const isCli = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCli) {
+  const extensionDir = process.argv[2];
+  if (!extensionDir) throw new Error('Usage: node patch-extension-web-content.mjs <extension-dir>');
+  const result = patchExtensionWebContent(path.resolve(extensionDir));
+  console.log(
+    `BMG web-content extension patch: background=${result.backgroundChanged ? 'patched' : 'already'} helper=${result.helperChanged ? 'patched' : 'already'}`,
+  );
+}
