@@ -1285,6 +1285,7 @@ export function createBmgServer(options = {}) {
   runtime.workspace = new BrowserWorkspaceRouter({
     enabled: config.workspaceMode,
     stateFile: config.workspaceStateFile,
+    idleTimeoutMs: config.workspaceIdleTimeoutSeconds * 1000,
     logger,
     bootstrapUrl: `http://localhost:${config.port}${WORKSPACE_BOOTSTRAP_PATH}`,
     placeWindowOffscreen: (nonce) => placeWorkspaceWindowOffscreen(config.rootDir, nonce),
@@ -1326,6 +1327,7 @@ export function listenBmgServer(runtime, port = runtime.config.port, host = runt
 }
 
 export async function closeBmgServer(runtime) {
+  await runtime.workspace?.close?.();
   await runtime.upstreamSession.close();
   if (!runtime.server.listening) {
     return;

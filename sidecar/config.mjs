@@ -112,6 +112,7 @@ export function createConfig(options = {}) {
     upstreamSessionFile,
     workspaceMode,
     workspaceStateFile,
+    workspaceIdleTimeoutSeconds,
     approvalSecretFile,
     logDir,
     tokenTtlSeconds,
@@ -169,6 +170,12 @@ export function createConfig(options = {}) {
     'BMG_WORKSPACE_MODE',
     workspaceMode ?? values.BMG_WORKSPACE_MODE ?? false,
   );
+  const selectedWorkspaceIdleTimeoutSeconds = requireInteger(
+    'BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS',
+    workspaceIdleTimeoutSeconds ?? values.BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS ?? 1800,
+    0,
+    604800,
+  );
 
   const selectedStateFile = resolveFromRoot(
     rootDir,
@@ -205,6 +212,7 @@ export function createConfig(options = {}) {
     upstreamSessionFile: selectedUpstreamSessionFile,
     workspaceMode: selectedWorkspaceMode,
     workspaceStateFile: selectedWorkspaceStateFile,
+    workspaceIdleTimeoutSeconds: selectedWorkspaceIdleTimeoutSeconds,
     approvalSecretFile: selectedApprovalSecretFile,
     logDir: selectedLogDir,
     tokenTtlSeconds: selectedTtl,

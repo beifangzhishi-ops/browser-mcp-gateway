@@ -737,7 +737,18 @@ test('Funnel ownership and lifecycle scripts stay narrowly scoped', () => {
 });
 
 test('configuration rejects reserved ports and keeps the production upstream fixed', () => {
-  assert.equal(createConfig({ readEnvFile: false, issuer: ISSUER, resource: RESOURCE }).port, 18007);
+  const defaults = createConfig({ readEnvFile: false, issuer: ISSUER, resource: RESOURCE });
+  assert.equal(defaults.port, 18007);
+  assert.equal(defaults.workspaceIdleTimeoutSeconds, 1800);
+  assert.equal(
+    createConfig({
+      readEnvFile: false,
+      issuer: ISSUER,
+      resource: RESOURCE,
+      workspaceIdleTimeoutSeconds: 0,
+    }).workspaceIdleTimeoutSeconds,
+    0,
+  );
   assert.throws(
     () =>
       createConfig({
@@ -812,6 +823,90 @@ function workspaceToolMessage(data, isError = false) {
     },
   };
 }
+
+test('workspace idle timeout closes only BMG tabs and recreates a clean workspace', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-idle-test-'));
+  let now = 0;
+  let scheduledTimer = null;
+  let workspaceSequence = 0;
+  const closeCalls = [];
+  const setTimer = (fn, delay) => {
+    const timer = { fn, delay, cancelled: false, unref() {} };
+    scheduledTimer = timer;
+    return timer;
+  };
+  const clearTimer = (timer) => {
+    timer.cancelled = true;
+    if (scheduledTimer === timer) scheduledTimer = null;
+  };
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    idleTimeoutMs: 1000,
+    clock: () => now,
+    setTimer,
+    clearTimer,
+    stateFile: path.join(rootDir, 'workspace.json'),
+    bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
+    logger: { error() {}, log() {} },
+    placeWindowOffscreen: async () => ({ hwnd: workspaceSequence === 1 ? 7003 : 7103 }),
+    callTool: async (name, args) => {
+      if (name === 'chrome_navigate' && args.newWindow === true) {
+        workspaceSequence += 1;
+        const base = workspaceSequence === 1 ? 7000 : 7100;
+        return workspaceToolMessage({ success: true, windowId: base + 1, tabs: [{ tabId: base + 2 }] });
+      }
+      if (name === 'get_windows_and_tabs') {
+        return workspaceToolMessage({
+          windows: [
+            { windowId: 7001, tabs: [{ tabId: 7002 }, { tabId: 7004 }, { tabId: 7005 }] },
+            { windowId: 9901, tabs: [{ tabId: 9902 }, { tabId: 9903 }] },
+          ],
+        });
+      }
+      if (name === 'chrome_close_tabs') {
+        closeCalls.push([...args.tabIds]);
+        return workspaceToolMessage({ success: true, closedCount: args.tabIds.length });
+      }
+      throw new Error('Unexpected internal tool call: ' + name);
+    },
+  });
+  t.after(async () => {
+    await router.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const first = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+  });
+  assert.equal(first.params.arguments.windowId, 7001);
+  assert.equal(scheduledTimer.delay, 1000);
+  const staleTimer = scheduledTimer;
+
+  now = 900;
+  await router.rewrite({ method: 'tools/call', params: { name: 'chrome_history', arguments: {} } });
+  const refreshedTimer = scheduledTimer;
+  assert.notEqual(refreshedTimer, staleTimer);
+  assert.equal(refreshedTimer.delay, 1000);
+
+  now = 1000;
+  await staleTimer.fn();
+  assert.deepEqual(closeCalls, []);
+
+  now = 1900;
+  await refreshedTimer.fn();
+  assert.deepEqual(closeCalls, [[7002, 7004, 7005]]);
+  assert.equal(router.windowId, null);
+  assert.equal(closeCalls[0].includes(9902), false);
+
+  now = 1901;
+  const fresh = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+  });
+  assert.equal(fresh.params.arguments.windowId, 7101);
+  assert.equal(fresh.params.arguments.tabId, 7102);
+});
 
 test('workspace router creates one background window and pins page tools to it', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-test-'));

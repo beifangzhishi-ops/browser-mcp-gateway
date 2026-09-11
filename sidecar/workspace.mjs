@@ -97,6 +97,10 @@ export class BrowserWorkspaceRouter {
     placeWindowOffscreen = async () => {},
     ensureWindowHidden = async () => {},
     showWindow = async () => {},
+    idleTimeoutMs = 30 * 60 * 1000,
+    clock = () => Date.now(),
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
     logger = console,
   } = {}) {
     this.enabled = enabled === true;
@@ -106,7 +110,18 @@ export class BrowserWorkspaceRouter {
     this.placeWindowOffscreen = placeWindowOffscreen;
     this.ensureWindowHidden = ensureWindowHidden;
     this.showWindow = showWindow;
+    this.idleTimeoutMs = Number(idleTimeoutMs);
+    this.clock = clock;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
     this.logger = logger;
+    if (!Number.isFinite(this.idleTimeoutMs) || this.idleTimeoutMs < 0) {
+      throw new Error('BMG workspace idle timeout must be a non-negative number.');
+    }
+    this.idleTimer = null;
+    this.idleCleanup = null;
+    this.lastActivityAt = this.clock();
+    this.activityGeneration = 0;
     const state = loadState(stateFile);
     this.windowId = state?.windowId || null;
     this.tabId = state?.tabId || null;
@@ -114,9 +129,94 @@ export class BrowserWorkspaceRouter {
     this.visible = state?.visible === true;
     this.validated = false;
     this.initializing = null;
+    if (this.windowId && this.tabId) this.scheduleIdleCleanup();
+  }
+
+  clearIdleTimer() {
+    if (this.idleTimer !== null) {
+      this.clearTimer(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  markActivity() {
+    if (!this.enabled || this.idleTimeoutMs === 0) return;
+    this.lastActivityAt = this.clock();
+    this.activityGeneration += 1;
+    this.scheduleIdleCleanup();
+  }
+
+  scheduleIdleCleanup() {
+    this.clearIdleTimer();
+    if (!this.enabled || this.idleTimeoutMs === 0 || !this.windowId || !this.tabId) return;
+    const generation = this.activityGeneration;
+    const elapsed = Math.max(0, this.clock() - this.lastActivityAt);
+    const delay = Math.max(1, this.idleTimeoutMs - elapsed);
+    let timer = null;
+    timer = this.setTimer(() => {
+      if (this.idleTimer === timer) this.idleTimer = null;
+      return this.runIdleCleanup(generation);
+    }, delay);
+    this.idleTimer = timer;
+    timer?.unref?.();
+  }
+
+  async runIdleCleanup(generation) {
+    if (this.idleCleanup) return this.idleCleanup;
+    const cleanup = this.cleanupIdleWorkspace(generation);
+    this.idleCleanup = cleanup;
+    try {
+      await cleanup;
+    } catch (error) {
+      this.logger?.error?.('BMG workspace idle cleanup failed; it will retry after the timeout.');
+      this.lastActivityAt = this.clock();
+      this.scheduleIdleCleanup();
+    } finally {
+      if (this.idleCleanup === cleanup) this.idleCleanup = null;
+    }
+  }
+
+  async cleanupIdleWorkspace(generation) {
+    if (!this.enabled || this.idleTimeoutMs === 0 || generation !== this.activityGeneration) return;
+    const elapsed = Math.max(0, this.clock() - this.lastActivityAt);
+    if (elapsed < this.idleTimeoutMs) {
+      this.scheduleIdleCleanup();
+      return;
+    }
+    if (!this.windowId) return;
+
+    const targetWindowId = this.windowId;
+    const message = await this.callTool('get_windows_and_tabs', {});
+    if (generation !== this.activityGeneration) return;
+    const data = parseToolData(message);
+    const windows = Array.isArray(data?.windows) ? data.windows : [];
+    const targetWindow = windows.find((item) => item?.windowId === targetWindowId);
+    if (!targetWindow) {
+      this.reset();
+      return;
+    }
+    const tabIds = [...new Set(
+      (Array.isArray(targetWindow.tabs) ? targetWindow.tabs : [])
+        .map((tab) => asPositiveInteger(tab?.tabId))
+        .filter(Boolean),
+    )];
+    if (tabIds.length === 0) {
+      this.reset();
+      return;
+    }
+    if (generation !== this.activityGeneration) return;
+    const closeMessage = await this.callTool('chrome_close_tabs', { tabIds });
+    const closeData = parseToolData(closeMessage);
+    if (toolResultIsError(closeMessage) || closeData?.success === false) {
+      throw new Error('BMG workspace tabs could not be closed.');
+    }
+    this.reset();
+    this.logger?.log?.(`BMG workspace closed ${tabIds.length} tab(s) after idle timeout.`);
   }
 
   reset() {
+    this.clearIdleTimer();
+    this.activityGeneration += 1;
     this.windowId = null;
     this.tabId = null;
     this.hwnd = null;
@@ -141,6 +241,7 @@ export class BrowserWorkspaceRouter {
       ...(validHwnd ? { hwnd: validHwnd } : {}),
       visible: this.visible,
     });
+    this.scheduleIdleCleanup();
     return true;
   }
 
@@ -213,6 +314,7 @@ export class BrowserWorkspaceRouter {
 
   async ensureWorkspace() {
     if (!this.enabled) return null;
+    if (this.idleCleanup) await this.idleCleanup;
     if (this.windowId && this.tabId && this.validated) {
       return { windowId: this.windowId, tabId: this.tabId, hwnd: this.hwnd, visible: this.visible };
     }
@@ -237,6 +339,7 @@ export class BrowserWorkspaceRouter {
 
   async showWorkspace() {
     if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
+    this.markActivity();
     this.validated = false;
     const workspace = await this.ensureWorkspace();
     const result = await this.showWindow(workspace.hwnd);
@@ -246,6 +349,7 @@ export class BrowserWorkspaceRouter {
 
   async hideWorkspace() {
     if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
+    this.markActivity();
     this.validated = false;
     const workspace = await this.ensureWorkspace();
     const result = await this.ensureWindowHidden(workspace.hwnd);
@@ -253,10 +357,17 @@ export class BrowserWorkspaceRouter {
     return { ...workspace, visible: false, hidden: result?.hidden !== false };
   }
 
+  async close() {
+    this.clearIdleTimer();
+    if (this.idleCleanup) await this.idleCleanup;
+    this.clearIdleTimer();
+  }
+
   async rewrite(payload) {
     if (!this.enabled || payload?.method !== 'tools/call') return payload;
     const name = payload.params?.name;
     if (typeof name !== 'string') return payload;
+    this.markActivity();
     if (name === 'get_windows_and_tabs' || !TARGET_TOOLS.has(name) && name !== 'chrome_close_tabs') {
       return payload;
     }
