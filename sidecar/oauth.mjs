@@ -6,6 +6,9 @@ export const OAUTH_SCOPE = 'mcp';
 const STATE_VERSION = 1;
 const CODE_TTL_SECONDS = 600;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const MAX_REGISTERED_CLIENTS = 256;
+const STALE_CLIENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const MAX_REDIRECT_URIS_PER_CLIENT = 16;
 
 export class OAuthError extends Error {
   constructor(code, description, status = 400) {
@@ -57,6 +60,12 @@ function validateRedirectUris(redirectUris) {
       'redirect_uris must contain at least one URI.',
     );
   }
+  if (redirectUris.length > MAX_REDIRECT_URIS_PER_CLIENT) {
+    throw new OAuthError(
+      'invalid_client_metadata',
+      `redirect_uris cannot contain more than ${MAX_REDIRECT_URIS_PER_CLIENT} URIs.`,
+    );
+  }
   const uniqueUris = [];
   for (const redirectUri of redirectUris) {
     if (typeof redirectUri !== 'string' || redirectUri.length > 2048) {
@@ -89,9 +98,17 @@ function createEmptyState() {
 }
 
 export class OAuthStore {
-  constructor(stateFile, clock = () => Date.now()) {
+  constructor(stateFile, clock = () => Date.now(), options = {}) {
     this.stateFile = stateFile;
     this.clock = clock;
+    this.maxClients = options.maxClients ?? MAX_REGISTERED_CLIENTS;
+    this.staleClientRetentionMs = options.staleClientRetentionMs ?? STALE_CLIENT_RETENTION_MS;
+    if (!Number.isInteger(this.maxClients) || this.maxClients < 1) {
+      throw new Error('OAuth max client count must be a positive integer.');
+    }
+    if (!Number.isInteger(this.staleClientRetentionMs) || this.staleClientRetentionMs < 0) {
+      throw new Error('OAuth stale client retention must be a non-negative integer.');
+    }
     this.state = this.load();
   }
 
@@ -131,6 +148,53 @@ export class OAuthStore {
     fs.renameSync(temporaryFile, this.stateFile);
   }
 
+  pruneExpiredRecords(now = this.clock()) {
+    let changed = false;
+    for (const collectionName of ['authorizationCodes', 'accessTokens', 'refreshTokens']) {
+      for (const [key, record] of Object.entries(this.state[collectionName])) {
+        if (Number.isFinite(record?.expiresAt) && record.expiresAt <= now) {
+          delete this.state[collectionName][key];
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  ensureRegistrationCapacity() {
+    const now = this.clock();
+    let changed = this.pruneExpiredRecords(now);
+    let clientCount = Object.keys(this.state.clients).length;
+    if (clientCount >= this.maxClients) {
+      const activeClientIds = new Set();
+      for (const collectionName of ['authorizationCodes', 'accessTokens', 'refreshTokens']) {
+        for (const record of Object.values(this.state[collectionName])) {
+          if (typeof record?.clientId === 'string') activeClientIds.add(record.clientId);
+        }
+      }
+      const cutoff = now - this.staleClientRetentionMs;
+      const staleClientIds = Object.entries(this.state.clients)
+        .filter(([clientId, client]) =>
+          !activeClientIds.has(clientId) && Number.isFinite(client?.createdAt) && client.createdAt <= cutoff)
+        .sort((left, right) => left[1].createdAt - right[1].createdAt)
+        .map(([clientId]) => clientId);
+      for (const clientId of staleClientIds) {
+        if (clientCount < this.maxClients) break;
+        delete this.state.clients[clientId];
+        clientCount -= 1;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
+    if (clientCount >= this.maxClients) {
+      throw new OAuthError(
+        'temporarily_unavailable',
+        'OAuth client registration capacity has been reached.',
+        503,
+      );
+    }
+  }
+
   registerClient(metadata) {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
       throw new OAuthError('invalid_client_metadata', 'Client metadata must be a JSON object.');
@@ -163,6 +227,7 @@ export class OAuthStore {
         'Only public clients with token endpoint auth method none are supported.',
       );
     }
+    this.ensureRegistrationCapacity();
     const clientId = createOpaqueValue('bmg_client_');
     const clientName =
       typeof metadata.client_name === 'string' && metadata.client_name.length <= 200

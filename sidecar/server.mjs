@@ -18,6 +18,8 @@ const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 120000;
 const MAX_UPSTREAM_RESPONSE_BYTES = 8 * 1024 * 1024;
+const REGISTRATION_RATE_LIMIT = 20;
+const REGISTRATION_RATE_WINDOW_MS = 60 * 1000;
 const MCP_SESSION_HEADER = 'mcp-session-id';
 const WORKSPACE_BOOTSTRAP_PATH = '/workspace-bootstrap';
 const REQUEST_HOP_HEADERS = new Set([
@@ -125,6 +127,25 @@ function setCors(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id');
+}
+
+function createRegistrationLimiter({ limit = REGISTRATION_RATE_LIMIT, windowMs = REGISTRATION_RATE_WINDOW_MS } = {}) {
+  if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(windowMs) || windowMs < 1000) {
+    throw new Error('Registration rate limit configuration is invalid.');
+  }
+  const timestamps = [];
+  return {
+    consume(now = Date.now()) {
+      const cutoff = now - windowMs;
+      while (timestamps.length > 0 && timestamps[0] <= cutoff) timestamps.shift();
+      if (timestamps.length >= limit) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((timestamps[0] + windowMs - now) / 1000));
+        return { allowed: false, retryAfterSeconds };
+      }
+      timestamps.push(now);
+      return { allowed: true, retryAfterSeconds: 0 };
+    },
+  };
 }
 
 function sendJson(response, status, payload, options = {}) {
@@ -466,6 +487,15 @@ async function handleConsent(request, response, runtime, url) {
 }
 
 async function handleRegistration(request, response, runtime) {
+  const registration = runtime.registrationLimiter.consume();
+  if (!registration.allowed) {
+    response.setHeader('Retry-After', String(registration.retryAfterSeconds));
+    sendOAuthError(
+      response,
+      new OAuthError('temporarily_unavailable', 'Too many client registration requests.', 429),
+    );
+    return;
+  }
   if (getContentType(request) !== 'application/json') {
     sendOAuthError(response, new OAuthError('invalid_request', 'JSON registration is required.'));
     return;
@@ -1243,6 +1273,10 @@ export function createBmgServer(options = {}) {
     logger,
     upstreamUrl,
     approvalSecret,
+    registrationLimiter: createRegistrationLimiter({
+      limit: options.registrationRateLimit ?? REGISTRATION_RATE_LIMIT,
+      windowMs: options.registrationRateWindowMs ?? REGISTRATION_RATE_WINDOW_MS,
+    }),
     upstreamSession: null,
     workspace: null,
     server: null,

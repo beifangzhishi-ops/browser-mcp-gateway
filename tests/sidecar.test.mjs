@@ -149,6 +149,8 @@ async function createTestRuntime(options = {}) {
   const runtime = createBmgServer({
     config,
     upstreamUrl: fakeUpstream.url,
+    registrationRateLimit: options.registrationRateLimit,
+    registrationRateWindowMs: options.registrationRateWindowMs,
     logger: { error() {}, log() {} },
   });
   await listenBmgServer(runtime);
@@ -483,6 +485,80 @@ test('OAuth registration, PKCE, bearer proxy, and revocation work end to end', a
   await closeBmgServer(fixture.runtime);
   const upstreamDeletes = fixture.fakeUpstream.calls.filter((call) => call.method === 'DELETE');
   assert.equal(upstreamDeletes.length, 0);
+});
+
+test('dynamic client registration is rate limited before state can grow quickly', async (t) => {
+  const fixture = await createTestRuntime({ registrationRateLimit: 2, registrationRateWindowMs: 60_000 });
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+
+  const register = (suffix) => requestJson(fixture.baseUrl, '/bmg/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      redirect_uris: [`https://client-${suffix}.example/callback`],
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    }),
+  });
+
+  assert.equal((await register('one')).response.status, 201);
+  assert.equal((await register('two')).response.status, 201);
+  const blocked = await register('three');
+  assert.equal(blocked.response.status, 429);
+  assert.equal(blocked.json.error, 'temporarily_unavailable');
+  assert.ok(Number(blocked.response.headers.get('retry-after')) >= 1);
+  const state = JSON.parse(fs.readFileSync(path.join(fixture.rootDir, 'state', 'oauth.json'), 'utf8'));
+  assert.equal(Object.keys(state.clients).length, 2);
+});
+
+test('client cap preserves active clients and evicts only stale unreferenced clients', () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-client-cap-test-'));
+  let now = 0;
+  try {
+    const store = new OAuthStore(path.join(rootDir, 'oauth.json'), () => now, {
+      maxClients: 2,
+      staleClientRetentionMs: 1000,
+    });
+    const register = (name) => store.registerClient({
+      redirect_uris: [`https://${name}.example/callback`],
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+    });
+    assert.throws(
+      () => store.registerClient({
+        redirect_uris: Array.from({ length: 17 }, (_, index) => `https://too-many-${index}.example/callback`),
+      }),
+      /cannot contain more than 16 URIs/u,
+    );
+    const active = register('active');
+    store.createAuthorizationCode({
+      clientId: active.clientId,
+      redirectUri: active.redirectUris[0],
+      codeChallenge: 'a'.repeat(43),
+      codeChallengeMethod: 'S256',
+      resource: RESOURCE,
+      scope: 'mcp',
+    });
+    const stale = register('stale');
+    let capacityError = null;
+    try { register('blocked'); } catch (error) { capacityError = error; }
+    assert.equal(capacityError?.status, 503);
+    assert.equal(capacityError?.code, 'temporarily_unavailable');
+
+    now = 2000;
+    const replacement = register('replacement');
+    assert.ok(store.getClient(active.clientId));
+    assert.equal(store.getClient(stale.clientId), null);
+    assert.ok(store.getClient(replacement.clientId));
+    assert.equal(Object.keys(store.state.clients).length, 2);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('legacy OAuth v1 state loads without refresh token records', () => {
