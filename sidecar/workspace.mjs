@@ -195,23 +195,40 @@ export class BrowserWorkspaceRouter {
       this.reset();
       return;
     }
-    const tabIds = [...new Set(
-      (Array.isArray(targetWindow.tabs) ? targetWindow.tabs : [])
-        .map((tab) => asPositiveInteger(tab?.tabId))
-        .filter(Boolean),
-    )];
+    const tabs = Array.isArray(targetWindow.tabs) ? targetWindow.tabs : [];
+    const tabIds = [...new Set(tabs.map((tab) => asPositiveInteger(tab?.tabId)).filter(Boolean))];
     if (tabIds.length === 0) {
       this.reset();
       return;
     }
+    const keepTabId = tabIds.includes(this.tabId)
+      ? this.tabId
+      : asPositiveInteger(tabs.find((tab) => tab?.active)?.tabId) || tabIds[0];
     if (generation !== this.activityGeneration) return;
-    const closeMessage = await this.callTool('chrome_close_tabs', { tabIds });
-    const closeData = parseToolData(closeMessage);
-    if (toolResultIsError(closeMessage) || closeData?.success === false) {
-      throw new Error('BMG workspace tabs could not be closed.');
+    const blankMessage = await this.callTool('chrome_navigate', {
+      url: 'about:blank',
+      tabId: keepTabId,
+      windowId: targetWindowId,
+      newWindow: false,
+      background: true,
+    });
+    if (toolResultIsError(blankMessage)) {
+      throw new Error('BMG workspace tab could not be reset to about:blank.');
     }
-    this.reset();
-    this.logger?.log?.(`BMG workspace closed ${tabIds.length} tab(s) after idle timeout.`);
+    if (generation !== this.activityGeneration) return;
+    const extraTabIds = tabIds.filter((tabId) => tabId !== keepTabId);
+    if (extraTabIds.length > 0) {
+      const closeMessage = await this.callTool('chrome_close_tabs', { tabIds: extraTabIds });
+      const closeData = parseToolData(closeMessage);
+      if (toolResultIsError(closeMessage) || closeData?.success === false) {
+        throw new Error('BMG workspace extra tabs could not be closed.');
+      }
+    }
+    if (this.hwnd) await this.ensureWindowHidden(this.hwnd);
+    this.lastActivityAt = this.clock();
+    this.activityGeneration += 1;
+    this.remember(targetWindowId, keepTabId, this.hwnd, false);
+    this.logger?.log?.(`BMG workspace reset to one hidden about:blank tab after idle timeout.`);
   }
 
   reset() {
@@ -407,17 +424,19 @@ export class BrowserWorkspaceRouter {
         this.hwnd,
         this.visible,
       );
-      if (this.hwnd && !this.visible) {
-        try {
-          await this.ensureWindowHidden(this.hwnd);
-        } catch {
-          this.validated = false;
-          this.logger?.error?.('BMG workspace HWND maintenance failed; browser result remains valid.');
-        }
-      }
     } else if (name === 'chrome_close_tabs') {
       const data = parseToolData(message);
       if (data?.success === true) this.reset();
+      return;
+    }
+    if (TARGET_TOOLS.has(name) && this.hwnd) {
+      try {
+        await this.ensureWindowHidden(this.hwnd);
+        this.remember(this.windowId, this.tabId, this.hwnd, false);
+      } catch {
+        this.validated = false;
+        this.logger?.error?.('BMG workspace HWND maintenance failed; browser result remains valid.');
+      }
     }
   }
 }

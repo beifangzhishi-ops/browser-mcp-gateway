@@ -824,12 +824,14 @@ function workspaceToolMessage(data, isError = false) {
   };
 }
 
-test('workspace idle timeout closes only BMG tabs and recreates a clean workspace', async (t) => {
+test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-idle-test-'));
   let now = 0;
   let scheduledTimer = null;
   let workspaceSequence = 0;
   const closeCalls = [];
+  const navigateCalls = [];
+  const hiddenHwnds = [];
   const setTimer = (fn, delay) => {
     const timer = { fn, delay, cancelled: false, unref() {} };
     scheduledTimer = timer;
@@ -849,11 +851,16 @@ test('workspace idle timeout closes only BMG tabs and recreates a clean workspac
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     logger: { error() {}, log() {} },
     placeWindowOffscreen: async () => ({ hwnd: workspaceSequence === 1 ? 7003 : 7103 }),
+    ensureWindowHidden: async (hwnd) => { hiddenHwnds.push(hwnd); return { hidden: true }; },
     callTool: async (name, args) => {
       if (name === 'chrome_navigate' && args.newWindow === true) {
         workspaceSequence += 1;
         const base = workspaceSequence === 1 ? 7000 : 7100;
         return workspaceToolMessage({ success: true, windowId: base + 1, tabs: [{ tabId: base + 2 }] });
+      }
+      if (name === 'chrome_navigate') {
+        navigateCalls.push({ ...args });
+        return workspaceToolMessage({ success: true, windowId: 7001, tabId: 7002 });
       }
       if (name === 'get_windows_and_tabs') {
         return workspaceToolMessage({
@@ -895,17 +902,28 @@ test('workspace idle timeout closes only BMG tabs and recreates a clean workspac
 
   now = 1900;
   await refreshedTimer.fn();
-  assert.deepEqual(closeCalls, [[7002, 7004, 7005]]);
-  assert.equal(router.windowId, null);
+  assert.deepEqual(navigateCalls, [{
+    url: 'about:blank',
+    tabId: 7002,
+    windowId: 7001,
+    newWindow: false,
+    background: true,
+  }]);
+  assert.deepEqual(closeCalls, [[7004, 7005]]);
   assert.equal(closeCalls[0].includes(9902), false);
+  assert.deepEqual(hiddenHwnds, [7003]);
+  assert.equal(router.windowId, 7001);
+  assert.equal(router.tabId, 7002);
+  assert.equal(router.visible, false);
+  assert.equal(scheduledTimer.delay, 1000);
 
   now = 1901;
   const fresh = await router.rewrite({
     method: 'tools/call',
     params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
   });
-  assert.equal(fresh.params.arguments.windowId, 7101);
-  assert.equal(fresh.params.arguments.tabId, 7102);
+  assert.equal(fresh.params.arguments.windowId, 7001);
+  assert.equal(fresh.params.arguments.tabId, 7002);
 });
 
 test('workspace router creates one background window and pins page tools to it', async (t) => {
@@ -1118,7 +1136,7 @@ test('workspace window script keeps Win32 hiding narrowly scoped', () => {
   assert.doesNotMatch(showScript, /taskkill|Stop-Process/iu);
 });
 
-test('workspace show and hide preserve one exact window and explicit visibility state', async (t) => {
+test('workspace returns to hidden mode after normal browser work resumes', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-visible-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
@@ -1153,11 +1171,14 @@ test('workspace show and hide preserve one exact window and explicit visibility 
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9501, tabId: 9502 }),
   );
-  assert.deepEqual(transitions, [['show', 9503]], 'visible workspace must not auto-hide after navigation');
+  assert.deepEqual(transitions, [['show', 9503], ['hide', 9503]]);
+  assert.equal(router.visible, false);
 
   const hidden = await router.hideWorkspace();
   assert.equal(hidden.visible, false);
-  assert.deepEqual(transitions, [['show', 9503], ['hide', 9503]]);
+  assert.deepEqual(transitions[0], ['show', 9503]);
+  assert.ok(transitions.length >= 3);
+  assert.ok(transitions.slice(1).every((transition) => transition[0] === 'hide' && transition[1] === 9503));
   const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   assert.deepEqual(
     { windowId: saved.windowId, tabId: saved.tabId, hwnd: saved.hwnd, visible: saved.visible },
