@@ -89,11 +89,11 @@ function Get-BmgHealth {
 
     $healthUrl = "http://127.0.0.1:$Port/health"
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 4 -ErrorAction Stop
-        if ([int]$response.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace([string]$response.Content)) {
+        $response = & curl.exe --silent --show-error --fail --noproxy "*" --connect-timeout 2 --max-time 4 $healthUrl 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($response -join "`n"))) {
             return $null
         }
-        $health = [string]$response.Content | ConvertFrom-Json
+        $health = ($response -join "`n") | ConvertFrom-Json
         if (
             $health.status -ne "ok" -or
             $health.service -ne "bmg-sidecar" -or

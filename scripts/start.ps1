@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$EnsureWorkspace)
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "bmg-common.ps1")
@@ -12,6 +12,15 @@ $pidFile = Join-Path $stateDir "bmg-sidecar.pid"
 $stdoutLog = Join-Path $logsDir "bmg-sidecar.out.log"
 $stderrLog = Join-Path $logsDir "bmg-sidecar.err.log"
 $entrypoint = Join-Path $repoRoot "sidecar\server.mjs"
+
+function Initialize-BmgWorkspace {
+    if (-not $EnsureWorkspace) { return }
+    $workspaceNode = Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    & $workspaceNode.Source (Join-Path $PSScriptRoot "ensure-workspace.mjs")
+    if ($LASTEXITCODE -ne 0) {
+        throw "BMG workspace startup failed. Check logs\bmg-workspace-startup.log."
+    }
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "config\.env"))) {
     throw "BMG config/.env is missing. Run scripts\enable-oauth.ps1 first."
@@ -32,6 +41,7 @@ if ($null -ne $listenerPid) {
     $health = Get-BmgHealth -Port $port
     if ($recordedPid -eq [string]$listenerPid -and $null -ne $health) {
         Write-Output "BMG sidecar is already running. PID=$listenerPid Port=$port"
+        Initialize-BmgWorkspace
         exit 0
     }
     throw "Port $port is already owned by an unverified process. Refusing to start BMG."
@@ -86,3 +96,4 @@ Set-Content -LiteralPath $pidFile -Value ([string]$listenerPid) -Encoding ASCII
 Write-Output "BMG sidecar started. PID=$listenerPid Port=$port"
 Write-Output "Local health: http://127.0.0.1:$port/health"
 Write-Output "Logs: $logsDir"
+Initialize-BmgWorkspace

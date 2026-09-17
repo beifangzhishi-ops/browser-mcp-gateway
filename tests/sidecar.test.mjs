@@ -8,6 +8,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, workspaceSupplementalToolsForTest } from '../sidecar/server.mjs';
 import { createConfig } from '../sidecar/config.mjs';
 import { BrowserWorkspaceRouter } from '../sidecar/workspace.mjs';
+import { prepareWorkspace } from '../scripts/ensure-workspace.mjs';
+import { execFileSync } from 'node:child_process';
 import { OAuthStore, createPkceChallenge } from '../sidecar/oauth.mjs';
 import {
   patchWebContentBackgroundText,
@@ -19,6 +21,113 @@ const RESOURCE = 'https://bmg.example.test/bmg/mcp';
 const PROTECTED_METADATA =
   'https://bmg.example.test/.well-known/oauth-protected-resource/bmg/mcp';
 const APPROVAL_SECRET = 'unit-test-approval-secret';
+
+test('本机启动检查拒绝未授权请求并报告工作区未启用', async (t) => {
+  const fixture = await createTestRuntime();
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+  const requestPath = '/internal/ensure-workspace';
+  const secretHeader = { 'x-bmg-local-secret': APPROVAL_SECRET };
+  for (const options of [
+    { method: 'POST' },
+    { method: 'POST', headers: { 'x-bmg-local-secret': 'wrong' } },
+    { method: 'GET', headers: secretHeader },
+    { method: 'POST', headers: { ...secretHeader, origin: 'https://example.test' } },
+    { method: 'OPTIONS', headers: secretHeader },
+  ]) {
+    const result = await requestJson(fixture.baseUrl, requestPath, options);
+    assert.equal(result.response.status, 403);
+  }
+  const result = await requestJson(fixture.baseUrl, requestPath, { method: 'POST', headers: secretHeader });
+  assert.equal(result.response.status, 409);
+  assert.equal(fixture.fakeUpstream.calls.length, 0);
+});
+
+test('启动检查初始化共享会话、合并并发请求并重建已关闭工作区', async (t) => {
+  const fixture = await createTestRuntime({ initializeDelayMs: 20 });
+  const router = fixture.runtime.workspace;
+  router.enabled = true;
+  let current = null;
+  let created = 0;
+  router.placeWindowOffscreen = async () => ({ hwnd: 9000 + created });
+  router.ensureWindowHidden = async () => ({ hidden: true });
+  router.callTool = async (name, args) => {
+    if (name === 'get_windows_and_tabs') {
+      return workspaceToolMessage({ windows: current ? [current] : [] });
+    }
+    assert.equal(name, 'chrome_navigate');
+    assert.equal(args.newWindow, true);
+    created += 1;
+    current = { windowId: 1000 + created, tabs: [{ tabId: 2000 + created }] };
+    return workspaceToolMessage(current);
+  };
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+  const check = () => requestJson(fixture.baseUrl, '/internal/ensure-workspace', {
+    method: 'POST', headers: { 'x-bmg-local-secret': APPROVAL_SECRET },
+  });
+  const results = await Promise.all([check(), check()]);
+  assert.ok(results.every((result) => result.response.status === 200));
+  assert.equal(created, 1);
+  assert.equal(fixture.fakeUpstream.calls.filter((call) => call.payload?.method === 'initialize').length, 1);
+  assert.equal((await check()).json.workspace.windowId, 1001);
+  assert.equal(created, 1);
+  current = null;
+  assert.equal((await check()).json.workspace.windowId, 1002);
+  assert.equal(created, 2);
+  router.callTool = async () => { throw new Error('模拟扩展暂未连接'); };
+  assert.equal((await check()).response.status, 503);
+});
+
+test('启动流程复用工作区，失败后仅检查一次 Edge 并按间隔重试', async () => {
+  let edgeChecks = 0;
+  const waits = [];
+  await prepareWorkspace({
+    request: async () => ({ ok: true }),
+    ensureEdge: async () => { edgeChecks += 1; },
+    wait: async (delay) => { waits.push(delay); },
+  });
+  assert.equal(edgeChecks, 0);
+  assert.deepEqual(waits, []);
+  let attempt = 0;
+  await prepareWorkspace({
+    request: async () => ({ ok: ++attempt === 4, status: 503 }),
+    ensureEdge: async () => { edgeChecks += 1; },
+    wait: async (delay) => { waits.push(delay); },
+  });
+  assert.equal(edgeChecks, 1);
+  assert.deepEqual(waits, [10000, 20000, 40000]);
+});
+
+test('启动流程遇到配置错误立即失败，扩展持续离线时有限重试', async () => {
+  for (const status of [403, 404, 409]) {
+    await assert.rejects(prepareWorkspace({
+      request: async () => ({ ok: false, status }),
+      ensureEdge: async () => assert.fail('配置错误不得启动 Edge'),
+      wait: async () => assert.fail('配置错误不得重试'),
+    }), /本机检查入口不可用/u);
+  }
+  let attempts = 0;
+  await assert.rejects(prepareWorkspace({
+    request: async () => { attempts += 1; return { ok: false, status: 503 }; },
+    ensureEdge: async () => {}, wait: async () => {},
+  }), /工作区启动失败/u);
+  assert.equal(attempts, 4);
+});
+
+test('Windows 启动脚本仅在当前会话缺少 Edge 时启动浏览器', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  execFileSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.resolve('tests/edge-startup.test.ps1')], { windowsHide: true, timeout: 15000 });
+});
 
 function readTextFile(relativePath) {
   return fs.readFileSync(path.resolve(process.cwd(), relativePath), 'utf8');
@@ -720,8 +829,8 @@ test('Funnel ownership and lifecycle scripts stay narrowly scoped', () => {
   assert.match(disable, /if \(-not \$Apply\)/u);
   assert.match(stop, /Get-BmgLoopbackListenerPid/u);
   assert.match(stop, /Get-BmgHealth/u);
-  assert.match(common, /Invoke-WebRequest/u);
-  assert.doesNotMatch(common, /curl\\.exe/iu);
+  assert.match(common, /curl\.exe/u);
+  assert.doesNotMatch(common, /Invoke-WebRequest/u);
   assert.match(stop, /Stop-Process -Id \$listenerPid/u);
   assert.doesNotMatch(stop, /Stop-Process\s+-Name/iu);
   assert.doesNotMatch(stop, /taskkill/iu);

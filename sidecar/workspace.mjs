@@ -329,9 +329,10 @@ export class BrowserWorkspaceRouter {
     return { windowId, tabId, hwnd: this.hwnd, visible: false };
   }
 
-  async ensureWorkspace() {
+  async ensureWorkspace({ revalidate = false } = {}) {
     if (!this.enabled) return null;
     if (this.idleCleanup) await this.idleCleanup;
+    if (revalidate) this.validated = false;
     if (this.windowId && this.tabId && this.validated) {
       return { windowId: this.windowId, tabId: this.tabId, hwnd: this.hwnd, visible: this.visible };
     }

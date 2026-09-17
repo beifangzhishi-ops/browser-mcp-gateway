@@ -34,11 +34,23 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 .\scripts\start.ps1
 ```
 
-安装当前用户登录自启（不需要管理员权限，只启动 BMG sidecar，不管理 Tailscale、12306 或 Edge）：
+安装或更新当前用户登录自启（无需管理员权限）：
 
 ```powershell
 .\scripts\install-autostart.ps1
 ```
+
+计划任务 `BMG Sidecar` 在当前用户登录 Windows 时执行 `start.ps1 -EnsureWorkspace`。它先启动或复用 BMG 服务，再检查专用浏览器工作区：已有窗口则复用，窗口缺失则创建隐藏工作区。如果创建失败，脚本会检查当前 Windows 会话的 Edge 进程；Edge 未运行时，使用默认用户配置启动一个空白窗口，然后等待扩展自动连接并再次创建工作区。已有 Edge 时保持其进程和用户配置。
+
+需在 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1`，并在所用 Edge 配置中安装、启用 BMG 扩展及其自动连接。工作区检查失败后依次等待 10、20、40 秒重试；最终失败会让计划任务报错，由任务按每分钟一次、最多三次的设置重试。日志位于 `logs/bmg-workspace-startup.log`。每次任务触发都会重新核对工作区是否存在；任务完成后不持续监控窗口。Windows 重启后需登录当前用户才触发任务。
+
+手动执行同一启动流程：
+
+```powershell
+.\scripts\start.ps1 -EnsureWorkspace
+```
+
+本机工作区检查接口 `/internal/ensure-workspace` 仅接受匹配本机地址、无浏览器 Origin 且携带本机认证密钥的 POST 请求，使用 sidecar 自身的共享上游会话。密钥从本地文件读取，不出现在启动参数或日志中。更新该功能后，已运行的 sidecar 需重启以加载新接口。
 
 如需移除：
 
@@ -88,7 +100,7 @@ https://your-machine.your-tailnet.ts.net/bmg/mcp
 Edge extension + normal Edge tabs
 ```
 
-sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周期。BMG 不启动浏览器、不使用 CDP 端口、不创建专用浏览器 profile，也不修改 upstream 核心实现。
+sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周期。登录启动脚本负责在需要时启动 Edge 并准备工作区；sidecar 通过扩展操作已有浏览器，不创建专用浏览器 profile，也不修改 upstream 核心实现。停止 sidecar 保留 Edge 和工作区窗口。
 
 ## Upstream versions currently pinned
 

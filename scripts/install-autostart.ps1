@@ -14,7 +14,7 @@ $taskName = "BMG Sidecar"
 $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $powershellPath `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`"" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`" -EnsureWorkspace" `
     -WorkingDirectory $repoRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 `
@@ -22,7 +22,7 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
-    -Description "Start the BMG browser MCP sidecar at user logon; retry startup failures."
+    -Description "Start BMG and prepare its workspace at user logon; retry startup failures."
 Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
 
 $startupDir = [Environment]::GetFolderPath("Startup")

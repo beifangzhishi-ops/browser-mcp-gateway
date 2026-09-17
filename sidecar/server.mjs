@@ -1185,6 +1185,44 @@ async function handleProtectedMcp(request, response, runtime, url) {
 
 async function handleRequest(request, response, runtime) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
+  if (url.pathname === '/internal/ensure-workspace') {
+    const address = runtime.server.address();
+    const localHost = `127.0.0.1:${address.port}`;
+    if (
+      request.method !== 'POST' ||
+      request.socket.remoteAddress !== '127.0.0.1' ||
+      request.headers.host !== localHost ||
+      request.headers.origin !== undefined ||
+      !constantTimeEqual(request.headers['x-bmg-local-secret'] || '', runtime.approvalSecret)
+    ) {
+      sendJson(response, 403, { error: 'forbidden' }, { noStore: true });
+      return;
+    }
+    if (!runtime.workspace.enabled) {
+      sendJson(response, 409, { error: 'workspace_disabled' }, { noStore: true });
+      return;
+    }
+    try {
+      if (!runtime.preparingWorkspace) {
+        runtime.preparingWorkspace = (async () => {
+          await runtime.upstreamSession.initializeFromRequest({}, {
+            jsonrpc: '2.0', id: 'bmg-startup', method: 'initialize',
+            params: {
+              protocolVersion: '2025-03-26', capabilities: {},
+              clientInfo: { name: 'bmg-startup', version: '1.0.0' },
+            },
+          });
+          runtime.workspace.markActivity();
+          return runtime.workspace.ensureWorkspace({ revalidate: true });
+        })().finally(() => { runtime.preparingWorkspace = null; });
+      }
+      const workspace = await runtime.preparingWorkspace;
+      sendJson(response, 200, { success: true, workspace }, { noStore: true });
+    } catch {
+      sendJson(response, 503, { error: 'workspace_unavailable' }, { noStore: true });
+    }
+    return;
+  }
   if (request.method === 'OPTIONS') {
     setCors(response);
     response.statusCode = 204;
