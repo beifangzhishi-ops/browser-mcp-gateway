@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomInt } from 'node:crypto';
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
+const STARTUP_STATE_VERSION = 1;
+const STARTUP_STATE_CLAIM_GRACE_MS = 30 * 1000;
+const STARTUP_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 const TARGET_TOOLS = new Set([
   'chrome_navigate',
   'chrome_screenshot',
@@ -63,10 +67,51 @@ function loadState(file) {
     const windowId = asPositiveInteger(state.windowId);
     const tabId = asPositiveInteger(state.tabId);
     const hwnd = asPositiveInteger(state.hwnd);
+    const windowMarker = asPositiveInteger(state.windowMarker);
+    const processId = asPositiveInteger(state.processId);
+    const processStartTimeUtc =
+      typeof state.processStartTimeUtc === 'string' && state.processStartTimeUtc
+        ? state.processStartTimeUtc
+        : null;
     const visible = state.visible === true;
-    return windowId && tabId ? { windowId, tabId, hwnd, visible } : null;
+    return windowId && tabId && hwnd && windowMarker
+      ? { windowId, tabId, hwnd, windowMarker, processId, processStartTimeUtc, visible }
+      : null;
   } catch {
     return null;
+  }
+}
+
+function loadStartupState(file, now) {
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/u, '');
+    const state = JSON.parse(text);
+    if (state?.version !== STARTUP_STATE_VERSION) return null;
+    if (typeof state.nonce !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/u.test(state.nonce)) return null;
+    const windowMarker = asPositiveInteger(state.windowMarker);
+    if (!Number.isFinite(state.createdAtMs) || !windowMarker) return null;
+    if (now - state.createdAtMs < 0 || now - state.createdAtMs > STARTUP_STATE_MAX_AGE_MS) return null;
+    return { nonce: state.nonce, createdAtMs: state.createdAtMs, windowMarker };
+  } catch {
+    return null;
+  }
+}
+
+function createWindowMarker() {
+  return randomInt(1, 0x7fffffff);
+}
+
+function bootstrapTabMatches(tab, bootstrapUrl, nonce) {
+  if (typeof tab?.url !== 'string') return false;
+  try {
+    const expected = new URL(bootstrapUrl);
+    const actual = new URL(tab.url);
+    return actual.origin === expected.origin &&
+      actual.pathname === expected.pathname &&
+      actual.searchParams.get('nonce') === nonce;
+  } catch {
+    return false;
   }
 }
 
@@ -92,11 +137,16 @@ export class BrowserWorkspaceRouter {
   constructor({
     enabled = false,
     stateFile = null,
+    startupStateFile = null,
     callTool,
     bootstrapUrl,
-    placeWindowOffscreen = async () => {},
+    claimWindow = async () => {},
+    inspectWindow = async () => {},
     ensureWindowHidden = async () => {},
     showWindow = async () => {},
+    recoverBrowser = null,
+    recoveryDelaysMs = [1000, 2500, 5000],
+    wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
     idleTimeoutMs = 30 * 60 * 1000,
     clock = () => Date.now(),
     setTimer = setTimeout,
@@ -105,11 +155,18 @@ export class BrowserWorkspaceRouter {
   } = {}) {
     this.enabled = enabled === true;
     this.stateFile = stateFile;
+    this.startupStateFile = startupStateFile;
     this.callTool = callTool;
     this.bootstrapUrl = bootstrapUrl;
-    this.placeWindowOffscreen = placeWindowOffscreen;
+    this.claimWindow = claimWindow;
+    this.inspectWindow = inspectWindow;
     this.ensureWindowHidden = ensureWindowHidden;
     this.showWindow = showWindow;
+    this.recoverBrowser = typeof recoverBrowser === 'function' ? recoverBrowser : null;
+    this.recoveryDelaysMs = Array.isArray(recoveryDelaysMs)
+      ? recoveryDelaysMs.map(Number).filter((delay) => Number.isFinite(delay) && delay >= 0)
+      : [];
+    this.wait = wait;
     this.idleTimeoutMs = Number(idleTimeoutMs);
     this.clock = clock;
     this.setTimer = setTimer;
@@ -126,6 +183,9 @@ export class BrowserWorkspaceRouter {
     this.windowId = state?.windowId || null;
     this.tabId = state?.tabId || null;
     this.hwnd = state?.hwnd || null;
+    this.windowMarker = state?.windowMarker || null;
+    this.processId = state?.processId || null;
+    this.processStartTimeUtc = state?.processStartTimeUtc || null;
     this.visible = state?.visible === true;
     this.validated = false;
     this.initializing = null;
@@ -224,11 +284,24 @@ export class BrowserWorkspaceRouter {
         throw new Error('BMG workspace extra tabs could not be closed.');
       }
     }
-    if (this.hwnd) await this.ensureWindowHidden(this.hwnd);
+    if (this.hwnd && this.windowMarker) {
+      const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+      this.updateWindowIdentity(hidden);
+    }
     this.lastActivityAt = this.clock();
     this.activityGeneration += 1;
     this.remember(targetWindowId, keepTabId, this.hwnd, false);
     this.logger?.log?.(`BMG workspace reset to one hidden about:blank tab after idle timeout.`);
+  }
+
+  updateWindowIdentity(info) {
+    const processId = asPositiveInteger(info?.processId);
+    const processStartTimeUtc =
+      typeof info?.processStartTimeUtc === 'string' && info.processStartTimeUtc
+        ? info.processStartTimeUtc
+        : null;
+    if (processId) this.processId = processId;
+    if (processStartTimeUtc) this.processStartTimeUtc = processStartTimeUtc;
   }
 
   reset() {
@@ -237,6 +310,9 @@ export class BrowserWorkspaceRouter {
     this.windowId = null;
     this.tabId = null;
     this.hwnd = null;
+    this.windowMarker = null;
+    this.processId = null;
+    this.processStartTimeUtc = null;
     this.visible = false;
     this.validated = false;
     removeState(this.stateFile);
@@ -246,7 +322,8 @@ export class BrowserWorkspaceRouter {
     const validWindowId = asPositiveInteger(windowId);
     const validTabId = asPositiveInteger(tabId);
     const validHwnd = asPositiveInteger(hwnd);
-    if (!validWindowId || !validTabId) return false;
+    const validWindowMarker = asPositiveInteger(this.windowMarker);
+    if (!validWindowId || !validTabId || !validHwnd || !validWindowMarker) return false;
     this.windowId = validWindowId;
     this.tabId = validTabId;
     this.hwnd = validHwnd;
@@ -255,7 +332,10 @@ export class BrowserWorkspaceRouter {
     saveState(this.stateFile, {
       windowId: validWindowId,
       tabId: validTabId,
-      ...(validHwnd ? { hwnd: validHwnd } : {}),
+      hwnd: validHwnd,
+      windowMarker: validWindowMarker,
+      ...(this.processId ? { processId: this.processId } : {}),
+      ...(this.processStartTimeUtc ? { processStartTimeUtc: this.processStartTimeUtc } : {}),
       visible: this.visible,
     });
     this.scheduleIdleCleanup();
@@ -263,7 +343,7 @@ export class BrowserWorkspaceRouter {
   }
 
   async validatePersistedWorkspace() {
-    if (!this.windowId || !this.tabId) return null;
+    if (!this.windowId || !this.tabId || !this.hwnd || !this.windowMarker) return null;
     const message = await this.callTool('get_windows_and_tabs', {});
     const data = parseToolData(message);
     const windows = Array.isArray(data?.windows) ? data.windows : [];
@@ -276,35 +356,105 @@ export class BrowserWorkspaceRouter {
       this.reset();
       return null;
     }
-    if (!this.hwnd) {
-      try { await this.callTool('chrome_close_tabs', { tabIds: [selectedTabId] }); } catch {}
+
+    try {
+      const info = await this.inspectWindow(this.hwnd, this.windowMarker);
+      const actualProcessId = asPositiveInteger(info?.processId);
+      const actualStart =
+        typeof info?.processStartTimeUtc === 'string' ? info.processStartTimeUtc : null;
+      if (this.processId && actualProcessId && this.processId !== actualProcessId) {
+        throw new Error('BMG workspace Edge process changed.');
+      }
+      if (this.processStartTimeUtc && actualStart && this.processStartTimeUtc !== actualStart) {
+        throw new Error('BMG workspace Edge process start time changed.');
+      }
+      this.updateWindowIdentity(info);
+      let visible = this.visible === true && info?.visible === true;
+      if (!visible) {
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        this.updateWindowIdentity(hidden);
+        visible = false;
+      }
+      this.remember(this.windowId, selectedTabId, this.hwnd, visible);
+      return {
+        windowId: this.windowId,
+        tabId: this.tabId,
+        hwnd: this.hwnd,
+        visible: this.visible,
+      };
+    } catch {
+      this.logger?.error?.('BMG workspace ownership validation failed; stale state will be retired without touching that window.');
       this.reset();
       return null;
     }
-    if (!this.visible) {
-      try {
-        await this.ensureWindowHidden(this.hwnd);
-      } catch (error) {
-        this.logger?.error?.('BMG workspace HWND validation failed; recreating workspace.');
-        try { await this.callTool('chrome_close_tabs', { tabIds: [selectedTabId] }); } catch {}
-        this.reset();
-        return null;
+  }
+
+  async claimStartupWorkspace() {
+    if (!this.startupStateFile) return null;
+    const startup = loadStartupState(this.startupStateFile, this.clock());
+    if (!startup) {
+      removeState(this.startupStateFile);
+      return null;
+    }
+
+    const message = await this.callTool('get_windows_and_tabs', {});
+    if (toolResultIsError(message)) {
+      throw new Error('BMG startup workspace could not enumerate browser windows yet.');
+    }
+    const data = parseToolData(message);
+    const windows = Array.isArray(data?.windows) ? data.windows : [];
+    const matches = [];
+    for (const browserWindow of windows) {
+      const windowId = asPositiveInteger(browserWindow?.windowId);
+      if (!windowId) continue;
+      for (const tab of Array.isArray(browserWindow?.tabs) ? browserWindow.tabs : []) {
+        const tabId = asPositiveInteger(tab?.tabId);
+        if (tabId && bootstrapTabMatches(tab, this.bootstrapUrl, startup.nonce)) {
+          matches.push({ windowId, tabId });
+        }
       }
     }
-    this.remember(this.windowId, selectedTabId, this.hwnd, this.visible);
-    return { windowId: this.windowId, tabId: this.tabId, hwnd: this.hwnd, visible: this.visible };
+    if (matches.length === 0) {
+      if (this.clock() - startup.createdAtMs <= STARTUP_STATE_CLAIM_GRACE_MS) {
+        throw new Error('BMG startup Edge window is not visible to the extension yet.');
+      }
+      removeState(this.startupStateFile);
+      return null;
+    }
+    if (matches.length !== 1) {
+      throw new Error('Multiple browser tabs matched the BMG startup nonce; refusing to claim any window.');
+    }
+
+    const windowMarker = startup.windowMarker;
+    const placement = await this.claimWindow(startup.nonce, windowMarker);
+    const hwnd = asPositiveInteger(placement?.hwnd);
+    if (!hwnd) throw new Error('BMG startup workspace HWND could not be captured.');
+    this.windowMarker = windowMarker;
+    this.updateWindowIdentity(placement);
+    if (!this.remember(matches[0].windowId, matches[0].tabId, hwnd, false)) {
+      throw new Error('BMG startup workspace identity could not be persisted.');
+    }
+    removeState(this.startupStateFile);
+    return {
+      windowId: this.windowId,
+      tabId: this.tabId,
+      hwnd: this.hwnd,
+      visible: false,
+    };
   }
 
   async createWorkspace() {
-    const nonce = `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+    const startupWorkspace = await this.claimStartupWorkspace();
+    if (startupWorkspace) return startupWorkspace;
+
+    const nonce = `${this.clock()}-${process.pid}-${randomInt(0, 0xffffffff).toString(16)}`;
     const separator = this.bootstrapUrl.includes('?') ? '&' : '?';
     const url = `${this.bootstrapUrl}${separator}nonce=${encodeURIComponent(nonce)}`;
+    const windowMarker = createWindowMarker();
     const message = await this.callTool('chrome_navigate', {
       url,
       newWindow: true,
       background: true,
-      width: 480,
-      height: 360,
     });
     const data = parseToolData(message);
     const windowId = asPositiveInteger(data?.windowId);
@@ -314,8 +464,10 @@ export class BrowserWorkspaceRouter {
       throw new Error('BMG workspace window could not be created.');
     }
     try {
-      const placement = await this.placeWindowOffscreen(nonce);
+      const placement = await this.claimWindow(nonce, windowMarker);
       const hwnd = asPositiveInteger(placement?.hwnd);
+      this.windowMarker = windowMarker;
+      this.updateWindowIdentity(placement);
       if (!hwnd || !this.remember(windowId, tabId, hwnd, false)) {
         throw new Error('BMG workspace HWND could not be captured.');
       }
@@ -329,6 +481,35 @@ export class BrowserWorkspaceRouter {
     return { windowId, tabId, hwnd: this.hwnd, visible: false };
   }
 
+  async prepareWorkspaceOnce() {
+    try {
+      const persisted = await this.validatePersistedWorkspace();
+      if (persisted) return persisted;
+    } catch {
+      this.reset();
+    }
+    return this.createWorkspace();
+  }
+
+  async prepareWorkspaceWithRecovery() {
+    try {
+      return await this.prepareWorkspaceOnce();
+    } catch (firstError) {
+      if (!this.recoverBrowser || this.recoveryDelaysMs.length === 0) throw firstError;
+      await this.recoverBrowser();
+      let lastError = firstError;
+      for (const delay of this.recoveryDelaysMs) {
+        if (delay > 0) await this.wait(delay);
+        try {
+          return await this.prepareWorkspaceOnce();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    }
+  }
+
   async ensureWorkspace({ revalidate = false } = {}) {
     if (!this.enabled) return null;
     if (this.idleCleanup) await this.idleCleanup;
@@ -337,15 +518,7 @@ export class BrowserWorkspaceRouter {
       return { windowId: this.windowId, tabId: this.tabId, hwnd: this.hwnd, visible: this.visible };
     }
     if (this.initializing) return this.initializing;
-    const task = (async () => {
-      try {
-        const persisted = await this.validatePersistedWorkspace();
-        if (persisted) return persisted;
-      } catch {
-        this.reset();
-      }
-      return this.createWorkspace();
-    })();
+    const task = this.prepareWorkspaceWithRecovery();
     this.initializing = task;
     try {
       return await task;
@@ -360,7 +533,8 @@ export class BrowserWorkspaceRouter {
     this.markActivity();
     this.validated = false;
     const workspace = await this.ensureWorkspace();
-    const result = await this.showWindow(workspace.hwnd);
+    const result = await this.showWindow(workspace.hwnd, this.windowMarker);
+    this.updateWindowIdentity(result);
     this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, true);
     return { ...workspace, visible: true, foreground: result?.foreground === true };
   }
@@ -370,7 +544,8 @@ export class BrowserWorkspaceRouter {
     this.markActivity();
     this.validated = false;
     const workspace = await this.ensureWorkspace();
-    const result = await this.ensureWindowHidden(workspace.hwnd);
+    const result = await this.ensureWindowHidden(workspace.hwnd, this.windowMarker);
+    this.updateWindowIdentity(result);
     this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, false);
     return { ...workspace, visible: false, hidden: result?.hidden !== false };
   }
@@ -430,9 +605,10 @@ export class BrowserWorkspaceRouter {
       if (data?.success === true) this.reset();
       return;
     }
-    if (TARGET_TOOLS.has(name) && this.hwnd) {
+    if (TARGET_TOOLS.has(name) && this.hwnd && this.windowMarker) {
       try {
-        await this.ensureWindowHidden(this.hwnd);
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        this.updateWindowIdentity(hidden);
         this.remember(this.windowId, this.tabId, this.hwnd, false);
       } catch {
         this.validated = false;

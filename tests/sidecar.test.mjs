@@ -52,8 +52,9 @@ test('启动检查初始化共享会话、合并并发请求并重建已关闭�
   router.enabled = true;
   let current = null;
   let created = 0;
-  router.placeWindowOffscreen = async () => ({ hwnd: 9000 + created });
-  router.ensureWindowHidden = async () => ({ hidden: true });
+  router.claimWindow = async (_nonce, marker) => ({ hwnd: 9000 + created, marker, visible: false });
+  router.inspectWindow = async (hwnd, marker) => ({ hwnd, marker, visible: false });
+  router.ensureWindowHidden = async (hwnd, marker) => ({ hwnd, marker, visible: false, hidden: true });
   router.callTool = async (name, args) => {
     if (name === 'get_windows_and_tabs') {
       return workspaceToolMessage({ windows: current ? [current] : [] });
@@ -260,6 +261,7 @@ async function createTestRuntime(options = {}) {
     upstreamUrl: fakeUpstream.url,
     registrationRateLimit: options.registrationRateLimit,
     registrationRateWindowMs: options.registrationRateWindowMs,
+    workspaceRecoverBrowser: null,
     logger: { error() {}, log() {} },
   });
   await listenBmgServer(runtime);
@@ -902,11 +904,20 @@ const textResponse = yield this.sendMessageToTab(tab.id, {
             return createErrorResponse("No active tab found");
           }
           const tab = tabs[0];
+            const newWindow2 = yield chrome.windows.create({
+              url,
+              width: typeof width === "number" ? width : DEFAULT_WINDOW_WIDTH,
+              height: typeof height === "number" ? height : DEFAULT_WINDOW_HEIGHT,
+              focused: background2 === true ? false : true
+            });
 suffix`;
   const first = patchWebContentBackgroundText(backgroundFixture);
   assert.equal(first.changed, true);
   assert.match(first.text, /BMG_WEB_CONTENT_FALLBACK_V1/u);
   assert.match(first.text, /BMG_INTERACTIVE_WORKSPACE_TARGET_V1/u);
+  assert.match(first.text, /BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1/u);
+  assert.match(first.text, /chrome\.windows\.create\(createWindowOptions\)/u);
+  assert.doesNotMatch(first.text, /width: typeof width === "number" \? width : DEFAULT_WINDOW_WIDTH/u);
   assert.match(first.text, /webContentMessageWithFallback/u);
   const second = patchWebContentBackgroundText(first.text);
   assert.equal(second.changed, false);
@@ -932,6 +943,188 @@ function workspaceToolMessage(data, isError = false) {
     },
   };
 }
+
+test('startup bootstrap window is claimed exactly once without creating a duplicate', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-startup-claim-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const stateFile = path.join(rootDir, 'workspace.json');
+  const startupStateFile = path.join(rootDir, 'bmg-edge-bootstrap.json');
+  fs.writeFileSync(
+    startupStateFile,
+    '\uFEFF' + JSON.stringify({
+      version: 1,
+      nonce: 'startup-owned',
+      windowMarker: 9604,
+      createdAtMs: 1000,
+    }),
+    'utf8',
+  );
+  const calls = [];
+  const claims = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile,
+    startupStateFile,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    clock: () => 1100,
+    claimWindow: async (nonce, marker) => {
+      claims.push({ nonce, marker });
+      return {
+        hwnd: 9603,
+        marker,
+        visible: false,
+        processId: 9605,
+        processStartTimeUtc: '2026-09-19T12:00:00.000Z',
+      };
+    },
+    callTool: async (name) => {
+      calls.push(name);
+      assert.equal(name, 'get_windows_and_tabs');
+      return workspaceToolMessage({
+        windows: [
+          { windowId: 9501, tabs: [{ tabId: 9502, url: 'https://user.example/' }] },
+          {
+            windowId: 9601,
+            tabs: [{
+              tabId: 9602,
+              url: 'http://127.0.0.1:12307/workspace-bootstrap?nonce=startup-owned',
+            }],
+          },
+        ],
+      });
+    },
+  });
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+  });
+  assert.deepEqual(calls, ['get_windows_and_tabs']);
+  assert.deepEqual(claims, [{ nonce: 'startup-owned', marker: 9604 }]);
+  assert.equal(rewritten.params.arguments.windowId, 9601);
+  assert.equal(rewritten.params.arguments.tabId, 9602);
+  assert.equal(fs.existsSync(startupStateFile), false);
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.equal(saved.windowMarker, 9604);
+  assert.equal(saved.processId, 9605);
+});
+
+test('expired startup claim grace retires an orphan nonce before creating a new workspace', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-startup-orphan-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const stateFile = path.join(rootDir, 'workspace.json');
+  const startupStateFile = path.join(rootDir, 'bmg-edge-bootstrap.json');
+  fs.writeFileSync(
+    startupStateFile,
+    JSON.stringify({
+      version: 1,
+      nonce: 'startup-orphan',
+      windowMarker: 9654,
+      createdAtMs: 1000,
+    }),
+    'utf8',
+  );
+  const calls = [];
+  const claims = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile,
+    startupStateFile,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    clock: () => 32001,
+    claimWindow: async (nonce, marker) => {
+      claims.push({ nonce, marker });
+      assert.notEqual(nonce, 'startup-orphan');
+      return { hwnd: 9663, marker, visible: false };
+    },
+    callTool: async (name, args) => {
+      calls.push(name);
+      if (name === 'get_windows_and_tabs') {
+        return workspaceToolMessage({ windows: [] });
+      }
+      if (name === 'chrome_navigate') {
+        return workspaceToolMessage({
+          success: true,
+          windowId: 9661,
+          tabs: [{ tabId: 9662, url: args.url }],
+        });
+      }
+      throw new Error('Unexpected internal tool call: ' + name);
+    },
+  });
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+  });
+  assert.deepEqual(calls, ['get_windows_and_tabs', 'chrome_navigate']);
+  assert.equal(claims.length, 1);
+  assert.equal(fs.existsSync(startupStateFile), false);
+  assert.equal(rewritten.params.arguments.windowId, 9661);
+  assert.equal(rewritten.params.arguments.tabId, 9662);
+});
+
+test('workspace request performs finite browser recovery and claims the recovered startup window', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-recovery-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const stateFile = path.join(rootDir, 'workspace.json');
+  const startupStateFile = path.join(rootDir, 'bmg-edge-bootstrap.json');
+  let recovered = false;
+  let recoveryCalls = 0;
+  const calls = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile,
+    startupStateFile,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    clock: () => 5000,
+    recoveryDelaysMs: [0],
+    wait: async () => assert.fail('zero-delay recovery must not sleep'),
+    recoverBrowser: async () => {
+      recoveryCalls += 1;
+      recovered = true;
+      fs.writeFileSync(
+        startupStateFile,
+        JSON.stringify({
+          version: 1,
+          nonce: 'recovered-owned',
+          windowMarker: 9704,
+          createdAtMs: 5000,
+        }),
+        'utf8',
+      );
+    },
+    claimWindow: async (nonce, marker) => {
+      assert.equal(nonce, 'recovered-owned');
+      assert.equal(marker, 9704);
+      return { hwnd: 9703, marker, visible: false };
+    },
+    callTool: async (name) => {
+      calls.push(name);
+      if (!recovered) {
+        assert.equal(name, 'chrome_navigate');
+        throw new Error('synthetic extension offline');
+      }
+      assert.equal(name, 'get_windows_and_tabs');
+      return workspaceToolMessage({
+        windows: [{
+          windowId: 9701,
+          tabs: [{
+            tabId: 9702,
+            url: 'http://127.0.0.1:12307/workspace-bootstrap?nonce=recovered-owned',
+          }],
+        }],
+      });
+    },
+  });
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_screenshot', arguments: { fullPage: false } },
+  });
+  assert.equal(recoveryCalls, 1);
+  assert.deepEqual(calls, ['chrome_navigate', 'get_windows_and_tabs']);
+  assert.equal(rewritten.params.arguments.windowId, 9701);
+  assert.equal(rewritten.params.arguments.tabId, 9702);
+  assert.equal(rewritten.params.arguments.background, true);
+});
 
 test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-idle-test-'));
@@ -959,7 +1152,7 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
     stateFile: path.join(rootDir, 'workspace.json'),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     logger: { error() {}, log() {} },
-    placeWindowOffscreen: async () => ({ hwnd: workspaceSequence === 1 ? 7003 : 7103 }),
+    claimWindow: async () => ({ hwnd: workspaceSequence === 1 ? 7003 : 7103 }),
     ensureWindowHidden: async (hwnd) => { hiddenHwnds.push(hwnd); return { hidden: true }; },
     callTool: async (name, args) => {
       if (name === 'chrome_navigate' && args.newWindow === true) {
@@ -1044,7 +1237,7 @@ test('workspace router creates one background window and pins page tools to it',
     stateFile: path.join(rootDir, 'workspace.json'),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     logger: { error() {}, log() {} },
-    placeWindowOffscreen: async () => ({ hwnd: 7003 }),
+    claimWindow: async () => ({ hwnd: 7003 }),
     callTool: async (name, args) => {
       calls.push({ name, args });
       if (name === 'chrome_navigate' && args.newWindow === true) {
@@ -1073,6 +1266,8 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(calls[0].name, 'chrome_navigate');
   assert.equal(calls[0].args.newWindow, true);
   assert.equal(calls[0].args.background, true);
+  assert.equal('width' in calls[0].args, false);
+  assert.equal('height' in calls[0].args, false);
   assert.equal(rewrittenRead.params.arguments.windowId, 7001);
   assert.equal(rewrittenRead.params.arguments.tabId, 7002);
   assert.equal(rewrittenRead.params.arguments.background, true);
@@ -1108,7 +1303,7 @@ test('workspace router narrows close-tabs to the GPT tab', async (t) => {
     enabled: true,
     stateFile: path.join(rootDir, 'workspace.json'),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
-    placeWindowOffscreen: async () => ({ hwnd: 8103 }),
+    claimWindow: async () => ({ hwnd: 8103 }),
     callTool: async () =>
       workspaceToolMessage({ success: true, windowId: 8101, tabs: [{ tabId: 8102 }] }),
   });
@@ -1126,13 +1321,23 @@ test('workspace router narrows close-tabs to the GPT tab', async (t) => {
 });
 
 
-test('persisted workspace re-applies hidden window style on restore and navigation', async (t) => {
+test('persisted v2 workspace verifies ownership before restoring hidden state', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-restore-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
+  const processStartTimeUtc = '2026-09-19T12:00:00.000Z';
   fs.writeFileSync(
     stateFile,
-    JSON.stringify({ version: 1, windowId: 9101, tabId: 9102, hwnd: 9103 }),
+    JSON.stringify({
+      version: 2,
+      windowId: 9101,
+      tabId: 9102,
+      hwnd: 9103,
+      windowMarker: 9104,
+      processId: 9105,
+      processStartTimeUtc,
+      visible: false,
+    }),
     'utf8',
   );
   let hiddenCalls = 0;
@@ -1140,9 +1345,16 @@ test('persisted workspace re-applies hidden window style on restore and navigati
     enabled: true,
     stateFile,
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
-    ensureWindowHidden: async (hwnd) => {
+    inspectWindow: async (hwnd, marker) => {
       assert.equal(hwnd, 9103);
+      assert.equal(marker, 9104);
+      return { hwnd, marker, visible: false, processId: 9105, processStartTimeUtc };
+    },
+    ensureWindowHidden: async (hwnd, marker) => {
+      assert.equal(hwnd, 9103);
+      assert.equal(marker, 9104);
       hiddenCalls += 1;
+      return { hwnd, marker, visible: false, processId: 9105, processStartTimeUtc };
     },
     callTool: async (name) => {
       assert.equal(name, 'get_windows_and_tabs');
@@ -1169,23 +1381,78 @@ test('persisted workspace re-applies hidden window style on restore and navigati
 });
 
 
-test('legacy workspace state without HWND is retired and recreated exactly', async (t) => {
+test('stale v2 HWND ownership is retired without closing the reported browser tab', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-stale-owner-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const stateFile = path.join(rootDir, 'workspace.json');
+  fs.writeFileSync(
+    stateFile,
+    JSON.stringify({
+      version: 2,
+      windowId: 9801,
+      tabId: 9802,
+      hwnd: 9803,
+      windowMarker: 9804,
+      visible: false,
+    }),
+    'utf8',
+  );
+  const calls = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    inspectWindow: async () => {
+      throw new Error('synthetic ownership mismatch');
+    },
+    claimWindow: async (_nonce, marker) => ({ hwnd: 9903, marker, visible: false }),
+    logger: { error() {}, log() {} },
+    callTool: async (name, args) => {
+      calls.push({ name, args });
+      if (name === 'get_windows_and_tabs') {
+        return workspaceToolMessage({
+          windows: [{ windowId: 9801, tabs: [{ tabId: 9802, active: true }] }],
+        });
+      }
+      if (name === 'chrome_navigate') {
+        return workspaceToolMessage({
+          success: true,
+          windowId: 9901,
+          tabs: [{ tabId: 9902, url: args.url }],
+        });
+      }
+      if (name === 'chrome_close_tabs') {
+        assert.fail('stale ownership must never close a possibly user-owned tab');
+      }
+      throw new Error('Unexpected internal tool call: ' + name);
+    },
+  });
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+  });
+  assert.deepEqual(calls.map((call) => call.name), ['get_windows_and_tabs', 'chrome_navigate']);
+  assert.equal(rewritten.params.arguments.windowId, 9901);
+  assert.equal(rewritten.params.arguments.tabId, 9902);
+});
+
+test('legacy v1 workspace state is retired without touching the stale browser window', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-legacy-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
-  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, windowId: 9201, tabId: 9202 }), 'utf8');
+  fs.writeFileSync(
+    stateFile,
+    JSON.stringify({ version: 1, windowId: 9201, tabId: 9202, hwnd: 9203 }),
+    'utf8',
+  );
   const calls = [];
   const router = new BrowserWorkspaceRouter({
     enabled: true,
     stateFile,
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
-    placeWindowOffscreen: async () => ({ hwnd: 9303 }),
+    claimWindow: async (_nonce, marker) => ({ hwnd: 9303, marker, visible: false }),
     callTool: async (name, args) => {
       calls.push({ name, args });
-      if (name === 'get_windows_and_tabs') {
-        return workspaceToolMessage({ windows: [{ windowId: 9201, tabs: [{ tabId: 9202, active: true }] }] });
-      }
-      if (name === 'chrome_close_tabs') return workspaceToolMessage({ success: true, closedCount: 1 });
       if (name === 'chrome_navigate') {
         return workspaceToolMessage({ success: true, windowId: 9301, tabs: [{ tabId: 9302, url: args.url }] });
       }
@@ -1196,10 +1463,13 @@ test('legacy workspace state without HWND is retired and recreated exactly', asy
     jsonrpc: '2.0', id: 5, method: 'tools/call',
     params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
   });
-  assert.deepEqual(calls.map((call) => call.name), ['get_windows_and_tabs', 'chrome_close_tabs', 'chrome_navigate']);
+  assert.deepEqual(calls.map((call) => call.name), ['chrome_navigate']);
   assert.equal(rewritten.params.arguments.windowId, 9301);
   assert.equal(rewritten.params.arguments.tabId, 9302);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).hwnd, 9303);
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.equal(saved.version, 2);
+  assert.equal(saved.hwnd, 9303);
+  assert.ok(Number.isInteger(saved.windowMarker) && saved.windowMarker > 0);
 });
 
 test('post-navigation hide maintenance failure does not turn a browser success into an error', async (t) => {
@@ -1209,7 +1479,7 @@ test('post-navigation hide maintenance failure does not turn a browser success i
     enabled: true,
     stateFile: path.join(rootDir, 'workspace.json'),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
-    placeWindowOffscreen: async () => ({ hwnd: 9403 }),
+    claimWindow: async () => ({ hwnd: 9403 }),
     ensureWindowHidden: async () => { throw new Error('synthetic hide failure'); },
     logger: { error() {}, log() {} },
     callTool: async () => workspaceToolMessage({ success: true, windowId: 9401, tabs: [{ tabId: 9402 }] }),
@@ -1225,24 +1495,40 @@ test('post-navigation hide maintenance failure does not turn a browser success i
   assert.equal(router.validated, false);
 });
 
-test('workspace window script keeps Win32 hiding narrowly scoped', () => {
-  const script = readTextFile('scripts/place-workspace-window-offscreen.ps1');
+test('workspace Win32 helpers true-hide only ownership-verified HWNDs without moving geometry', () => {
+  const script = readTextFile('scripts/hide-workspace-window.ps1');
   assert.match(script, /WS_EX_TOOLWINDOW/u);
   assert.match(script, /WS_EX_APPWINDOW/u);
   assert.match(script, /ParameterSetName = 'Hwnd'/u);
-  assert.match(script, /\[int64\]\$hWnd -ne \$TargetHwnd/u);
+  assert.match(script, /BMG_BROWSER_MCP_WORKSPACE_V1/u);
+  assert.match(script, /GetProp/u);
+  assert.match(script, /SetProp/u);
+  assert.match(script, /ShowWindowAsync\(\$target, 0\).*SW_HIDE/u);
+  assert.match(script, /SWP_NOMOVE/u);
+  assert.match(script, /SWP_NOSIZE/u);
   assert.match(script, /Multiple Edge windows matched/u);
-  assert.doesNotMatch(script, /ExistingOffscreen/u);
-  assert.match(script, /SWP_NOACTIVATE/u);
   assert.match(script, /ProcessName -ne 'msedge'/u);
+  assert.match(script, /ownership marker mismatch/u);
+  assert.match(script, /hide unexpectedly changed window geometry/u);
+  assert.doesNotMatch(script, /-32000/u);
   assert.doesNotMatch(script, /taskkill|Stop-Process|ProcessName -eq 'msedge'.*Stop/isu);
+
   const showScript = readTextFile('scripts/show-workspace-window.ps1');
   assert.match(showScript, /TargetHwnd/u);
+  assert.match(showScript, /WindowMarker/u);
+  assert.match(showScript, /GetProp/u);
   assert.match(showScript, /SetForegroundWindow/u);
-  assert.match(showScript, /WS_EX_TOOLWINDOW/u);
-  assert.match(showScript, /WS_EX_APPWINDOW/u);
+  assert.match(showScript, /SWP_NOMOVE/u);
+  assert.match(showScript, /SWP_NOSIZE/u);
   assert.match(showScript, /ProcessName -ne 'msedge'/u);
+  assert.match(showScript, /show unexpectedly changed window geometry/u);
+  assert.doesNotMatch(showScript, /GetSystemMetrics|-32000/u);
   assert.doesNotMatch(showScript, /taskkill|Stop-Process/iu);
+
+  const ensureEdge = readTextFile('scripts/ensure-edge.ps1');
+  assert.match(ensureEdge, /windowMarker = Get-Random/u);
+  assert.match(ensureEdge, /hide-workspace-window\.ps1/u);
+  assert.match(ensureEdge, /"-Nonce", \$nonce, "-WindowMarker"/u);
 });
 
 test('workspace returns to hidden mode after normal browser work resumes', async (t) => {
@@ -1254,7 +1540,7 @@ test('workspace returns to hidden mode after normal browser work resumes', async
     enabled: true,
     stateFile,
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
-    placeWindowOffscreen: async () => ({ hwnd: 9503 }),
+    claimWindow: async () => ({ hwnd: 9503 }),
     ensureWindowHidden: async (hwnd) => { transitions.push(['hide', hwnd]); return { hidden: true }; },
     showWindow: async (hwnd) => { transitions.push(['show', hwnd]); return { foreground: true }; },
     callTool: async (name, args) => {

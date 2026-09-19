@@ -57,7 +57,10 @@ async function main() {
       ensureEdge: async () => {
         const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
         await execFileAsync(powershell, [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(rootDir, 'scripts', 'ensure-edge.ps1'),
+          '-NoProfile', '-ExecutionPolicy', 'Bypass',
+          '-File', path.join(rootDir, 'scripts', 'ensure-edge.ps1'),
+          '-Port', String(config.port),
+          '-BootstrapStateFile', path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
         ], { windowsHide: true, timeout: 15000 });
       },
     });

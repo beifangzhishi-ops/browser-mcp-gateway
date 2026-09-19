@@ -69,7 +69,7 @@ const WORKSPACE_LOCAL_TOOLS = [
   {
     name: 'bmg_hide_workspace',
     description:
-      'Return the dedicated BMG Edge workspace to hidden off-screen background mode after manual interaction. Only the tracked GPT workspace window is affected.',
+      'Return the dedicated BMG Edge workspace to true hidden background mode after manual interaction. Only the ownership-verified GPT workspace window is affected.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
@@ -603,19 +603,10 @@ async function handleRevocation(request, response, runtime) {
   }
 }
 
-async function placeWorkspaceWindowOffscreen(rootDir, nonce) {
-  const script = path.join(rootDir, 'scripts', 'place-workspace-window-offscreen.ps1');
-  const result = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Nonce', nonce],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
-  );
-  const lines = String(result.stdout || '').trim().split(/\r?\n/u).filter(Boolean);
-  const placement = JSON.parse(lines.at(-1) || '{}');
-  if (!Number.isInteger(placement.hwnd) || placement.hwnd <= 0) {
-    throw new Error('BMG workspace HWND was not returned by the window helper.');
+function assertWorkspaceWindowMarker(marker) {
+  if (!Number.isInteger(marker) || marker <= 0 || marker > 0x7fffffff) {
+    throw new Error('BMG workspace ownership marker is invalid.');
   }
-  return placement;
 }
 
 function parseWindowHelperResult(stdout) {
@@ -627,30 +618,82 @@ function parseWindowHelperResult(stdout) {
   return result;
 }
 
-async function ensureWorkspaceWindowHidden(rootDir, hwnd) {
-  if (!Number.isInteger(hwnd) || hwnd <= 0) {
-    throw new Error('BMG workspace HWND is invalid.');
-  }
-  const script = path.join(rootDir, 'scripts', 'place-workspace-window-offscreen.ps1');
+async function claimWorkspaceWindow(rootDir, nonce, marker) {
+  assertWorkspaceWindowMarker(marker);
+  const script = path.join(rootDir, 'scripts', 'hide-workspace-window.ps1');
   const result = await execFileAsync(
     'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-TargetHwnd', String(hwnd)],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
-  );
-  return { ...parseWindowHelperResult(result.stdout), hidden: true };
-}
-
-async function showWorkspaceWindow(rootDir, hwnd) {
-  if (!Number.isInteger(hwnd) || hwnd <= 0) {
-    throw new Error('BMG workspace HWND is invalid.');
-  }
-  const script = path.join(rootDir, 'scripts', 'show-workspace-window.ps1');
-  const result = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-TargetHwnd', String(hwnd)],
+    [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-Nonce', nonce, '-WindowMarker', String(marker),
+    ],
     { cwd: rootDir, windowsHide: true, timeout: 10000 },
   );
   return parseWindowHelperResult(result.stdout);
+}
+
+async function inspectWorkspaceWindow(rootDir, hwnd, marker) {
+  if (!Number.isInteger(hwnd) || hwnd <= 0) {
+    throw new Error('BMG workspace HWND is invalid.');
+  }
+  assertWorkspaceWindowMarker(marker);
+  const script = path.join(rootDir, 'scripts', 'hide-workspace-window.ps1');
+  const result = await execFileAsync(
+    'powershell.exe',
+    [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-TargetHwnd', String(hwnd), '-WindowMarker', String(marker), '-InspectOnly',
+    ],
+    { cwd: rootDir, windowsHide: true, timeout: 10000 },
+  );
+  return parseWindowHelperResult(result.stdout);
+}
+
+async function ensureWorkspaceWindowHidden(rootDir, hwnd, marker) {
+  if (!Number.isInteger(hwnd) || hwnd <= 0) {
+    throw new Error('BMG workspace HWND is invalid.');
+  }
+  assertWorkspaceWindowMarker(marker);
+  const script = path.join(rootDir, 'scripts', 'hide-workspace-window.ps1');
+  const result = await execFileAsync(
+    'powershell.exe',
+    [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-TargetHwnd', String(hwnd), '-WindowMarker', String(marker),
+    ],
+    { cwd: rootDir, windowsHide: true, timeout: 10000 },
+  );
+  const hidden = parseWindowHelperResult(result.stdout);
+  return { ...hidden, hidden: hidden.visible === false };
+}
+
+async function showWorkspaceWindow(rootDir, hwnd, marker) {
+  if (!Number.isInteger(hwnd) || hwnd <= 0) {
+    throw new Error('BMG workspace HWND is invalid.');
+  }
+  assertWorkspaceWindowMarker(marker);
+  const script = path.join(rootDir, 'scripts', 'show-workspace-window.ps1');
+  const result = await execFileAsync(
+    'powershell.exe',
+    [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-TargetHwnd', String(hwnd), '-WindowMarker', String(marker),
+    ],
+    { cwd: rootDir, windowsHide: true, timeout: 10000 },
+  );
+  return parseWindowHelperResult(result.stdout);
+}
+
+async function ensureWorkspaceBrowser(rootDir, port, startupStateFile) {
+  const script = path.join(rootDir, 'scripts', 'ensure-edge.ps1');
+  await execFileAsync(
+    'powershell.exe',
+    [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-Port', String(port), '-BootstrapStateFile', startupStateFile,
+    ],
+    { cwd: rootDir, windowsHide: true, timeout: 15000 },
+  );
 }
 
 function sendWorkspaceBootstrap(response, nonce) {
@@ -1323,12 +1366,22 @@ export function createBmgServer(options = {}) {
   runtime.workspace = new BrowserWorkspaceRouter({
     enabled: config.workspaceMode,
     stateFile: config.workspaceStateFile,
+    startupStateFile: path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
     idleTimeoutMs: config.workspaceIdleTimeoutSeconds * 1000,
     logger,
-    bootstrapUrl: `http://localhost:${config.port}${WORKSPACE_BOOTSTRAP_PATH}`,
-    placeWindowOffscreen: (nonce) => placeWorkspaceWindowOffscreen(config.rootDir, nonce),
-    ensureWindowHidden: (hwnd) => ensureWorkspaceWindowHidden(config.rootDir, hwnd),
-    showWindow: (hwnd) => showWorkspaceWindow(config.rootDir, hwnd),
+    bootstrapUrl: `http://127.0.0.1:${config.port}${WORKSPACE_BOOTSTRAP_PATH}`,
+    claimWindow: (nonce, marker) => claimWorkspaceWindow(config.rootDir, nonce, marker),
+    inspectWindow: (hwnd, marker) => inspectWorkspaceWindow(config.rootDir, hwnd, marker),
+    ensureWindowHidden: (hwnd, marker) =>
+      ensureWorkspaceWindowHidden(config.rootDir, hwnd, marker),
+    showWindow: (hwnd, marker) => showWorkspaceWindow(config.rootDir, hwnd, marker),
+    recoverBrowser: options.workspaceRecoverBrowser === undefined
+      ? () => ensureWorkspaceBrowser(
+          config.rootDir,
+          config.port,
+          path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
+        )
+      : options.workspaceRecoverBrowser,
     callTool: (name, args) => runtime.upstreamSession.callTool(name, args),
   });
   const server = http.createServer((request, response) => {

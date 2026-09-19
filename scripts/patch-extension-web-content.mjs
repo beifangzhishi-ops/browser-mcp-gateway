@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const MARKER = 'BMG_WEB_CONTENT_FALLBACK_V1';
 const INTERACTIVE_MARKER = 'BMG_INTERACTIVE_WORKSPACE_TARGET_V1';
+const WINDOW_GEOMETRY_MARKER = 'BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1';
 const CLASS_ANCHOR = '  class WebFetcherTool extends BaseBrowserToolExecutor {';
 const HELPER_OLD = "const pingActions = ['search_tabs_content_ping', 'chrome_web_fetcher_ping'];";
 const HELPER_NEW =
@@ -45,6 +46,20 @@ const INTERACTIVE_TAB_NEW = `          // ${INTERACTIVE_MARKER}
             }
             tab = tabs[0];
           }`;
+const WINDOW_CREATE_OLD = `            const newWindow2 = yield chrome.windows.create({
+              url,
+              width: typeof width === "number" ? width : DEFAULT_WINDOW_WIDTH,
+              height: typeof height === "number" ? height : DEFAULT_WINDOW_HEIGHT,
+              focused: background2 === true ? false : true
+            });`;
+const WINDOW_CREATE_NEW = `            // ${WINDOW_GEOMETRY_MARKER}
+            const createWindowOptions = {
+              url,
+              focused: background2 === true ? false : true
+            };
+            if (typeof width === "number") createWindowOptions.width = width;
+            if (typeof height === "number") createWindowOptions.height = height;
+            const newWindow2 = yield chrome.windows.create(createWindowOptions);`;
 const FALLBACK_HELPER = `  // ${MARKER}
   function webContentMessageWithFallback(tool, tabId, action, selector, asHtml) {
     return __async(this, null, function* () {
@@ -101,6 +116,10 @@ export function patchWebContentBackgroundText(text) {
   if (!next.includes(INTERACTIVE_MARKER)) {
     next = replaceExactlyOnce(next, INTERACTIVE_ARGS_OLD, INTERACTIVE_ARGS_NEW, 'interactive args');
     next = replaceExactlyOnce(next, INTERACTIVE_TAB_OLD, INTERACTIVE_TAB_NEW, 'interactive tab');
+    changed = true;
+  }
+  if (!next.includes(WINDOW_GEOMETRY_MARKER)) {
+    next = replaceExactlyOnce(next, WINDOW_CREATE_OLD, WINDOW_CREATE_NEW, 'new-window geometry');
     changed = true;
   }
   return { text: next, changed };

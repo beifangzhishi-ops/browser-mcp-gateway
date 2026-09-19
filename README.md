@@ -244,11 +244,19 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
-Set `BMG_WORKSPACE_MODE=1` in the local ignored `config/.env` to pin page-directed MCP tools to one BMG-owned Edge window/tab. The sidecar creates the workspace window unfocused, persists only its non-sensitive `windowId`/`tabId` plus the exact Win32 `hwnd` under `.state/bmg-workspace.json`, and injects those IDs into upstream tool calls. Navigation stays in that workspace and `chrome_close_tabs` is narrowed to the workspace tab, so normal foreground Edge windows are not selected by default.
+在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，`chrome_close_tabs` 也会被收窄到工作区标签页，避免默认选中普通前台 Edge 窗口。
 
-The workspace window is intentionally still a normal user-profile Edge window so it shares the user's existing login state. BMG keeps it unfocused, moves the dedicated workspace window off-screen, and marks it as a Win32 tool window so it stays out of the normal taskbar/Alt-Tab app list while remaining normally rendered for screenshots. Read-only global tools such as history/bookmarks/window listing are not window-scoped. When manual login, QR scanning, CAPTCHA, or verification is required, `bmg_show_workspace` restores that exact tracked HWND to a normal foreground Edge window without changing its tab or profile; `bmg_hide_workspace` returns the same window to off-screen tool-window mode. Once normal page-directed browser automation resumes, BMG automatically returns that workspace to hidden off-screen mode after the tool result. The explicit visible/hidden state is persisted across sidecar restarts.
+正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸，只有显式调用 `bmg_show_workspace` 时才尝试前台激活。页面自动化恢复后，BMG 会再次把同一个 ownership-verified 工作区真正隐藏。
 
-`BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` controls automatic workspace cleanup and defaults to `1800` (30 minutes). Any browser tool activity refreshes the idle deadline. When the deadline expires, BMG re-checks the exact tracked workspace window, navigates the tracked tab to `about:blank`, closes only any extra tabs in that same window, and keeps the one blank tab hidden for the next page-directed call. Set the value to `0` to disable idle cleanup. This clears page state without destroying the dedicated Edge workspace and intentionally preserves the shared Edge profile, cookies, and login state.
+新工作区创建不再传固定的 480×360 尺寸。受 Git 管理的 `scripts/patch-extension-web-content.mjs` 还会补丁上游 `chrome_navigate`：调用方未指定宽高时，`chrome.windows.create` 不再自动补入上游默认的 1280×720。这样 BMG 不再通过固定小窗口或屏幕外坐标持续覆盖共享 Edge 的普通窗口几何。旧的 v1 工作区状态没有可验证 marker，会被安全退休；不会凭旧 HWND 去移动、显示或关闭旧窗口。因此其他机器若仍保留由 v1 对应的旧窗口，该窗口可能继续存在到用户关闭它或 Edge 重启，BMG 不会为了去重而猜测归属后强行清理。
+
+登录准备时，`scripts/ensure-edge.ps1` 只在当前交互会话没有 Edge 时启动浏览器。新启动窗口使用一次性 `/workspace-bootstrap?nonce=...` URL，并把 nonce 与 ownership marker 写到 `.state/bmg-edge-bootstrap.json`；脚本会立即尝试用同一个真正隐藏 helper 认领并 `SW_HIDE` 该窗口。sidecar 随后只认领 URL 中 nonce 完全匹配的窗口，不再额外创建第二个空白窗口。若扩展尚未连接，启动流程保持有限重试，不把“存在 Edge 进程”当成“工作区已经可用”。
+
+普通使用请求也有一次有限恢复路径：首次工作区准备失败后，sidecar 调用同一个 `ensure-edge.ps1`，默认按 1 秒、2.5 秒、5 秒间隔重试工作区准备。该脚本在当前会话已有 Edge 时不会新启动进程，因此这不是持续监控，也不会在用户没有使用请求时反复拉起主动退出的 Edge。若浏览器／扩展仍未就绪，请求最终按错误返回，不无限创建窗口。
+
+`BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` 控制自动清理，默认 `1800` 秒。浏览器工具活动会刷新期限；到期后 BMG 重新验证 ownership，导航工作区标签页到 `about:blank`，只关闭同一受控窗口中的额外标签页，并保留一个真正隐藏的空白标签页。设置为 `0` 可禁用空闲清理。读历史、书签、窗口列表等全局工具仍不是 window-scoped。
+
+自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、人工显示后恢复隐藏、截图参数绑定，以及扩展补丁幂等；`npm.cmd test` 当前为 29/29 通过。此前独立真实窗口试验已经证明普通后台截图可在 `SW_HIDE` 状态下工作，但本轮正式代码尚未执行真实桌面窗口、并发普通 Edge、整页／元素截图或实际重启登录验收。按照项目桌面操作约束，这些仍需用户明确安排后再做，不能用单元测试替代。
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 
@@ -256,7 +264,7 @@ Treat the public MCP URL as a privileged automation endpoint even though OAuth i
 
 ## 真正隐藏窗口的独立验证（2026-09-19）
 
-本机使用独立测试窗口验证了 Windows `ShowWindowAsync(SW_HIDE)`，未修改正式工作区隐藏方式。试验通过现有上游 MCP 调用 `chrome_screenshot`，明确传入测试 `tabId`、`windowId`、`background: true`、`fullPage: false`，绕开 sidecar 自动重新移出屏幕的维护步骤。
+本机在正式接入前使用独立测试窗口验证了 Windows `ShowWindowAsync(SW_HIDE)`；该次试验本身没有修改当时的正式工作区隐藏方式。试验通过现有上游 MCP 调用 `chrome_screenshot`，明确传入测试 `tabId`、`windowId`、`background: true`、`fullPage: false`，绕开当时 sidecar 的屏幕外维护步骤。当前正式实现已经改用真正隐藏，但下列结果仍作为真实窗口证据保留。
 
 验证结果：
 
@@ -268,7 +276,7 @@ Treat the public MCP URL as a privileged automation endpoint even though OAuth i
 
 第二轮使用 `--hidden-only`：创建后隐藏，等待 10 秒再截图，完成后直接关闭测试标签页。两次截图前后均为不可见、坐标保持 `(0, 10, 960, 730)`，记录中只有隐藏事件；阶段二截图和内容读取成功。用户在两轮试验中均观察到短暂闪现，因此尚不能宣称整套流程无闪现。创建测试窗口到隐藏之间存在可见阶段，需与截图阶段分别验证；未把用户观察归因于“小概率并发”。
 
-这证明当前版本的普通后台截图可与真正隐藏配合。整页截图、元素截图、长期隐藏、正式工作区恢复，以及普通 Edge 窗口的位置记忆尚未完成验证。正式接入前还需调整隐藏／显示脚本对不可见 HWND 的识别逻辑。
+这证明普通后台截图可与真正隐藏配合。当前代码已调整隐藏／显示脚本以识别真正不可见且 ownership-verified 的 HWND，并用自动化测试覆盖 sidecar 恢复；但整页截图、元素截图、长期真实隐藏、用户同时操作普通 Edge、普通窗口位置记忆和实际重启登录仍未完成真实桌面验收。
 
 重复试验前需连接 BMG 扩展，并明确允许操作新建测试窗口；脚本依赖 Windows、Node.js 和 Python。执行期间会创建一个 960×720 的测试窗口、隐藏并恢复它，最后关闭其唯一测试标签页；不操作已有用户窗口。创建和关闭测试窗口仍可能更新 Edge 的普通窗口大小／位置记忆。
 
