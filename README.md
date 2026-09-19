@@ -109,7 +109,7 @@ sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周�
 - Extension release: `v1.0.0`
 - Extension archive SHA256: `e0f7edfe84b64fd452deec048fc202cfa33585943da63a06c08e2bbc97770f6a`
 
-The source checkout is kept under ignored `upstream/mcp-chrome/` for inspection only. Runtime uses the upstream npm bridge package and release extension rather than a locally modified fork.
+上游源码保存在忽略目录 `upstream/mcp-chrome/` 中供查阅。运行时使用固定版本的 npm bridge 和发行版扩展；安装脚本对扩展应用网页内容稳定性补丁和 BMG 工作区窗口补丁，补丁源码保存在 `scripts/` 中。
 
 ## Requirements
 
@@ -244,7 +244,28 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 Set `BMG_WORKSPACE_MODE=1` in the local ignored `config/.env` to pin page-directed MCP tools to one BMG-owned Edge window/tab. The sidecar creates the workspace window unfocused, persists only its non-sensitive `windowId`/`tabId` plus the exact Win32 `hwnd` under `.state/bmg-workspace.json`, and injects those IDs into upstream tool calls. Navigation stays in that workspace and `chrome_close_tabs` is narrowed to the workspace tab, so normal foreground Edge windows are not selected by default.
 
-The workspace window is intentionally still a normal user-profile Edge window so it shares the user's existing login state. BMG keeps it unfocused, moves the dedicated workspace window off-screen, and marks it as a Win32 tool window so it stays out of the normal taskbar/Alt-Tab app list while remaining normally rendered for screenshots. Read-only global tools such as history/bookmarks/window listing are not window-scoped. When manual login, QR scanning, CAPTCHA, or verification is required, `bmg_show_workspace` restores that exact tracked HWND to a normal foreground Edge window without changing its tab or profile; `bmg_hide_workspace` returns the same window to off-screen tool-window mode. Once normal page-directed browser automation resumes, BMG automatically returns that workspace to hidden off-screen mode after the tool result. The explicit visible/hidden state is persisted across sidecar restarts.
+工作区使用当前 Edge 用户配置中的 `popup` 弹出窗口，继续共享已有的 Cookie 和登录状态。BMG 只对记录中的专用工作区 HWND 执行屏幕外隐藏和 Win32 工具窗口样式设置，使它不出现在普通任务栏与 Alt-Tab 列表中，同时保持页面渲染。需要手动登录、扫码或验证时，`bmg_show_workspace` 将该窗口显示到前台；`bmg_hide_workspace` 将同一窗口隐藏。普通页面自动化恢复后，BMG 会再次隐藏工作区。显示状态会跨 sidecar 重启保存。
+
+普通窗口与弹出窗口在 Chromium 中使用不同的位置记忆项（[Chromium 源码](https://chromium.googlesource.com/chromium/src/+/HEAD/chrome/browser/ui/browser_window_state.cc)）。使用弹出窗口可隔离 BMG 对普通 Edge 窗口位置的影响；实际效果需在本机重载扩展后验证。工作区依然采用屏幕外隐藏，网站弹出窗口与 BMG 弹出窗口仍可能共用弹出窗口位置记忆。历史、书签和窗口列表等全局只读工具不限制在工作区内。
+
+### 修复普通 Edge 新窗口从屏幕边缘出现
+
+旧工作区属于 Edge 普通窗口类型，屏幕外隐藏可能覆盖普通窗口的位置记忆。`setup.ps1` 自动应用窗口类型补丁；已有安装可在项目根目录运行：
+
+```powershell
+node scripts\patch-extension-workspace-window.mjs extension
+```
+
+保存浏览器中未完成的工作后，按以下顺序完成更新：
+
+1. 运行 `scripts\stop.ps1` 停止 BMG sidecar。
+2. 在 `edge://extensions/` 中重新加载 BMG 扩展。
+3. 使用 Edge 菜单的“关闭 Microsoft Edge”退出浏览器，确保旧隐藏工作区也已关闭，然后重新打开 Edge。
+4. 将普通 Edge 窗口移到希望的位置并调整大小，关闭该窗口后重新打开，恢复位置记忆。
+5. 运行 `scripts\start.ps1 -EnsureWorkspace`，创建新弹出工作区。
+6. 手动打开、关闭普通 Edge 窗口，确认位置仍按你的操作保存。
+
+更新 sidecar 后，如果扩展尚未重载或旧工作区仍为普通窗口，BMG 会拒绝将其移到屏幕外并保留旧工作区记录。扩展补丁只对带工作区标记的本机引导地址启用弹出类型，普通导航维持原有创建方式。
 
 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` controls automatic workspace cleanup and defaults to `1800` (30 minutes). Any browser tool activity refreshes the idle deadline. When the deadline expires, BMG re-checks the exact tracked workspace window, navigates the tracked tab to `about:blank`, closes only any extra tabs in that same window, and keeps the one blank tab hidden for the next page-directed call. Set the value to `0` to disable idle cleanup. This clears page state without destroying the dedicated Edge workspace and intentionally preserves the shared Edge profile, cookies, and login state.
 

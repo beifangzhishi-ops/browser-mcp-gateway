@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import './workspace-window.test.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, workspaceSupplementalToolsForTest } from '../sidecar/server.mjs';
 import { createConfig } from '../sidecar/config.mjs';
@@ -61,7 +62,7 @@ test('启动检查初始化共享会话、合并并发请求并重建已关闭�
     assert.equal(name, 'chrome_navigate');
     assert.equal(args.newWindow, true);
     created += 1;
-    current = { windowId: 1000 + created, tabs: [{ tabId: 2000 + created }] };
+    current = { windowType: 'popup', windowId: 1000 + created, tabs: [{ tabId: 2000 + created }] };
     return workspaceToolMessage(current);
   };
   t.after(async () => {
@@ -965,7 +966,7 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
       if (name === 'chrome_navigate' && args.newWindow === true) {
         workspaceSequence += 1;
         const base = workspaceSequence === 1 ? 7000 : 7100;
-        return workspaceToolMessage({ success: true, windowId: base + 1, tabs: [{ tabId: base + 2 }] });
+        return workspaceToolMessage({ success: true, windowType: 'popup', windowId: base + 1, tabs: [{ tabId: base + 2 }] });
       }
       if (name === 'chrome_navigate') {
         navigateCalls.push({ ...args });
@@ -974,7 +975,7 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
       if (name === 'get_windows_and_tabs') {
         return workspaceToolMessage({
           windows: [
-            { windowId: 7001, tabs: [{ tabId: 7002 }, { tabId: 7004 }, { tabId: 7005 }] },
+            { windowType: 'popup', windowId: 7001, tabs: [{ tabId: 7002 }, { tabId: 7004 }, { tabId: 7005 }] },
             { windowId: 9901, tabs: [{ tabId: 9902 }, { tabId: 9903 }] },
           ],
         });
@@ -1051,12 +1052,13 @@ test('workspace router creates one background window and pins page tools to it',
         return workspaceToolMessage({
           success: true,
           windowId: 7001,
+          windowType: 'popup',
           tabs: [{ tabId: 7002, url: args.url }],
         });
       }
       if (name === 'get_windows_and_tabs') {
         return workspaceToolMessage({
-          windows: [{ windowId: 7001, tabs: [{ tabId: 7002, active: true }] }],
+          windows: [{ windowType: 'popup', windowId: 7001, tabs: [{ tabId: 7002, active: true }] }],
         });
       }
       throw new Error('Unexpected internal tool call: ' + name);
@@ -1073,6 +1075,7 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(calls[0].name, 'chrome_navigate');
   assert.equal(calls[0].args.newWindow, true);
   assert.equal(calls[0].args.background, true);
+  assert.equal(new URL(calls[0].args.url).searchParams.get('bmgWindow'), 'popup-v1');
   assert.equal(rewrittenRead.params.arguments.windowId, 7001);
   assert.equal(rewrittenRead.params.arguments.tabId, 7002);
   assert.equal(rewrittenRead.params.arguments.background, true);
@@ -1110,7 +1113,7 @@ test('workspace router narrows close-tabs to the GPT tab', async (t) => {
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     placeWindowOffscreen: async () => ({ hwnd: 8103 }),
     callTool: async () =>
-      workspaceToolMessage({ success: true, windowId: 8101, tabs: [{ tabId: 8102 }] }),
+      workspaceToolMessage({ success: true, windowType: 'popup', windowId: 8101, tabs: [{ tabId: 8102 }] }),
   });
   const rewritten = await router.rewrite({
     jsonrpc: '2.0',
@@ -1147,7 +1150,7 @@ test('persisted workspace re-applies hidden window style on restore and navigati
     callTool: async (name) => {
       assert.equal(name, 'get_windows_and_tabs');
       return workspaceToolMessage({
-        windows: [{ windowId: 9101, tabs: [{ tabId: 9102, active: true }] }],
+        windows: [{ windowType: 'popup', windowId: 9101, tabs: [{ tabId: 9102, active: true }] }],
       });
     },
   });
@@ -1183,11 +1186,11 @@ test('legacy workspace state without HWND is retired and recreated exactly', asy
     callTool: async (name, args) => {
       calls.push({ name, args });
       if (name === 'get_windows_and_tabs') {
-        return workspaceToolMessage({ windows: [{ windowId: 9201, tabs: [{ tabId: 9202, active: true }] }] });
+        return workspaceToolMessage({ windows: [{ windowType: 'popup', windowId: 9201, tabs: [{ tabId: 9202, active: true }] }] });
       }
       if (name === 'chrome_close_tabs') return workspaceToolMessage({ success: true, closedCount: 1 });
       if (name === 'chrome_navigate') {
-        return workspaceToolMessage({ success: true, windowId: 9301, tabs: [{ tabId: 9302, url: args.url }] });
+        return workspaceToolMessage({ success: true, windowType: 'popup', windowId: 9301, tabs: [{ tabId: 9302, url: args.url }] });
       }
       throw new Error('Unexpected internal tool call: ' + name);
     },
@@ -1212,7 +1215,7 @@ test('post-navigation hide maintenance failure does not turn a browser success i
     placeWindowOffscreen: async () => ({ hwnd: 9403 }),
     ensureWindowHidden: async () => { throw new Error('synthetic hide failure'); },
     logger: { error() {}, log() {} },
-    callTool: async () => workspaceToolMessage({ success: true, windowId: 9401, tabs: [{ tabId: 9402 }] }),
+    callTool: async () => workspaceToolMessage({ success: true, windowType: 'popup', windowId: 9401, tabs: [{ tabId: 9402 }] }),
   });
   await router.rewrite({
     jsonrpc: '2.0', id: 6, method: 'tools/call',
@@ -1259,10 +1262,10 @@ test('workspace returns to hidden mode after normal browser work resumes', async
     showWindow: async (hwnd) => { transitions.push(['show', hwnd]); return { foreground: true }; },
     callTool: async (name, args) => {
       if (name === 'chrome_navigate') {
-        return workspaceToolMessage({ success: true, windowId: 9501, tabs: [{ tabId: 9502, url: args.url }] });
+        return workspaceToolMessage({ success: true, windowType: 'popup', windowId: 9501, tabs: [{ tabId: 9502, url: args.url }] });
       }
       if (name === 'get_windows_and_tabs') {
-        return workspaceToolMessage({ windows: [{ windowId: 9501, tabs: [{ tabId: 9502, active: true }] }] });
+        return workspaceToolMessage({ windows: [{ windowType: 'popup', windowId: 9501, tabs: [{ tabId: 9502, active: true }] }] });
       }
       throw new Error('Unexpected internal tool call: ' + name);
     },

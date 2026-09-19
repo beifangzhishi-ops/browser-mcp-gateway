@@ -31,6 +31,14 @@ function asPositiveInteger(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
+function requirePopupWindow(window) {
+  if (window?.windowType !== 'popup') {
+    const error = new Error('BMG 工作区需要弹出窗口：请重载已更新的扩展，并关闭旧工作区窗口后重试。');
+    error.code = 'BMG_WORKSPACE_WINDOW_TYPE';
+    throw error;
+  }
+}
+
 function parseTextContent(content) {
   if (!Array.isArray(content)) return null;
   const textItem = content.find((item) => item?.type === 'text' && typeof item.text === 'string');
@@ -195,6 +203,7 @@ export class BrowserWorkspaceRouter {
       this.reset();
       return;
     }
+    requirePopupWindow(targetWindow);
     const tabs = Array.isArray(targetWindow.tabs) ? targetWindow.tabs : [];
     const tabIds = [...new Set(tabs.map((tab) => asPositiveInteger(tab?.tabId)).filter(Boolean))];
     if (tabIds.length === 0) {
@@ -276,6 +285,7 @@ export class BrowserWorkspaceRouter {
       this.reset();
       return null;
     }
+    requirePopupWindow(targetWindow);
     if (!this.hwnd) {
       try { await this.callTool('chrome_close_tabs', { tabIds: [selectedTabId] }); } catch {}
       this.reset();
@@ -298,7 +308,7 @@ export class BrowserWorkspaceRouter {
   async createWorkspace() {
     const nonce = `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
     const separator = this.bootstrapUrl.includes('?') ? '&' : '?';
-    const url = `${this.bootstrapUrl}${separator}nonce=${encodeURIComponent(nonce)}`;
+    const url = `${this.bootstrapUrl}${separator}nonce=${encodeURIComponent(nonce)}&bmgWindow=popup-v1`;
     const message = await this.callTool('chrome_navigate', {
       url,
       newWindow: true,
@@ -314,6 +324,7 @@ export class BrowserWorkspaceRouter {
       throw new Error('BMG workspace window could not be created.');
     }
     try {
+      requirePopupWindow(data);
       const placement = await this.placeWindowOffscreen(nonce);
       const hwnd = asPositiveInteger(placement?.hwnd);
       if (!hwnd || !this.remember(windowId, tabId, hwnd, false)) {
@@ -341,7 +352,8 @@ export class BrowserWorkspaceRouter {
       try {
         const persisted = await this.validatePersistedWorkspace();
         if (persisted) return persisted;
-      } catch {
+      } catch (error) {
+        if (error?.code === 'BMG_WORKSPACE_WINDOW_TYPE') throw error;
         this.reset();
       }
       return this.createWorkspace();

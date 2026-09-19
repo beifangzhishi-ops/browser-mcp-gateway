@@ -173,6 +173,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "BMG web-content extension patch failed."
 }
 
+Write-Output "应用 BMG 工作区窗口位置隔离补丁..."
+& $node.Source (Join-Path $PSScriptRoot "patch-extension-workspace-window.mjs") $extensionDir
+if ($LASTEXITCODE -ne 0) {
+    throw "BMG 工作区窗口补丁失败。"
+}
+
 Write-Output ""
 Write-Output "Setup complete."
 Write-Output "Upstream reference commit: $upstreamCommit"
