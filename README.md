@@ -1,5 +1,7 @@
 # Browser MCP Gateway
 
+工作区真正隐藏与登录恢复的后续实施见 [中文实施计划](PLAN.md)，其中包含当前证据、实施顺序、恢复策略及验收标准。
+
 Windows gateway around [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome) for using an existing Microsoft Edge session from ChatGPT through an OAuth-protected HTTPS endpoint such as Tailscale Funnel.
 
 This repository wraps the upstream project, adds Microsoft Edge Native Messaging registration on Windows, and exposes it through an independent local OAuth sidecar.
