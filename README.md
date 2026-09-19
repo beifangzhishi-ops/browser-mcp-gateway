@@ -252,6 +252,32 @@ The upstream project exposes powerful browser capabilities. BMG therefore keeps 
 
 Treat the public MCP URL as a privileged automation endpoint even though OAuth is required. Keep the upstream listener bound to localhost, protect the public route with the sidecar, and avoid exposing any unprotected browser-control port. The generated OAuth state, approval secret, workspace state, logs, and `config/.env` are local-only and must not be committed.
 
+## 真正隐藏窗口的独立验证（2026-09-19）
+
+本机使用独立测试窗口验证了 Windows `ShowWindowAsync(SW_HIDE)`，未修改正式工作区隐藏方式。试验通过现有上游 MCP 调用 `chrome_screenshot`，明确传入测试 `tabId`、`windowId`、`background: true`、`fullPage: false`，绕开 sidecar 自动重新移出屏幕的维护步骤。
+
+验证结果：
+
+- 窗口从可见变为不可见，保持非最小化状态，边界始终为 `(960, 12, 1920, 732)`。
+- 隐藏后仍能正常取得当前视口截图；隐藏期间导航到新页面，内容读取与截图均显示新内容。
+- Windows 窗口事件记录中，隐藏期间没有重新显示事件。
+- 隐藏状态下新页面的截图与恢复可见后的截图文件完全一致。
+- 测试窗口已恢复并关闭。
+
+第二轮使用 `--hidden-only`：创建后隐藏，等待 10 秒再截图，完成后直接关闭测试标签页。两次截图前后均为不可见、坐标保持 `(0, 10, 960, 730)`，记录中只有隐藏事件；阶段二截图和内容读取成功。用户在两轮试验中均观察到短暂闪现，因此尚不能宣称整套流程无闪现。创建测试窗口到隐藏之间存在可见阶段，需与截图阶段分别验证；未把用户观察归因于“小概率并发”。
+
+这证明当前版本的普通后台截图可与真正隐藏配合。整页截图、元素截图、长期隐藏、正式工作区恢复，以及普通 Edge 窗口的位置记忆尚未完成验证。正式接入前还需调整隐藏／显示脚本对不可见 HWND 的识别逻辑。
+
+重复试验前需连接 BMG 扩展，并明确允许操作新建测试窗口；脚本依赖 Windows、Node.js 和 Python。执行期间会创建一个 960×720 的测试窗口、隐藏并恢复它，最后关闭其唯一测试标签页；不操作已有用户窗口。创建和关闭测试窗口仍可能更新 Edge 的普通窗口大小／位置记忆。
+
+```powershell
+node scripts\test-hidden-window.mjs
+# 隐藏后直接关闭，不主动恢复窗口
+node scripts\test-hidden-window.mjs --hidden-only
+```
+
+截图及记录写入 `.state/隐藏窗口试验/`。若上游会话已失效，脚本会重新初始化共享 MCP 会话并保存连接信息；不重启服务，不删除共享会话。Windows 控制器 `scripts/probe-hidden-window.py` 每次操作前检查随机标题标记、进程 ID 和 `msedge.exe` 身份，使用窗口事件监听记录显示／隐藏变化。参考：[Windows 窗口隐藏接口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindowasync)、[CDP 截图接口](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-captureScreenshot)。
+
 ## Why this repository exists
 
 `mcp-chrome` already provides the mature browser integration: tabs, existing login state, page extraction, interactions, screenshots, network tools, history/bookmarks, and Streamable HTTP MCP. The only local glue needed for this setup is:
