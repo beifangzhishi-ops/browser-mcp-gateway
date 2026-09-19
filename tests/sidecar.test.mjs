@@ -910,12 +910,24 @@ const textResponse = yield this.sendMessageToTab(tab.id, {
               height: typeof height === "number" ? height : DEFAULT_WINDOW_HEIGHT,
               focused: background2 === true ? false : true
             });
+                const hostNoWww = u.host.replace(/^www\\./, "");
+                const hostWithWww = hostNoWww.startsWith("www.") ? hostNoWww : \`www.\${hostNoWww}\`;
+                patterns2.add(\`\${u.protocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostWithWww}\${pathWildcard}\`);
+                const altProtocol = u.protocol === "https:" ? "http:" : "https:";
+                patterns2.add(\`\${altProtocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostWithWww}\${pathWildcard}\`);
 suffix`;
   const first = patchWebContentBackgroundText(backgroundFixture);
   assert.equal(first.changed, true);
   assert.match(first.text, /BMG_WEB_CONTENT_FALLBACK_V1/u);
   assert.match(first.text, /BMG_INTERACTIVE_WORKSPACE_TARGET_V1/u);
   assert.match(first.text, /BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1/u);
+  assert.match(first.text, /BMG_SAFE_URL_PATTERN_HOSTS_V1/u);
+  assert.match(first.text, /hostnameNoWww !== "localhost" && !isIpLiteral/u);
+  assert.match(first.text, /if \(hostWithWww\) patterns2\.add/u);
   assert.match(first.text, /chrome\.windows\.create\(createWindowOptions\)/u);
   assert.doesNotMatch(first.text, /width: typeof width === "number" \? width : DEFAULT_WINDOW_WIDTH/u);
   assert.match(first.text, /webContentMessageWithFallback/u);

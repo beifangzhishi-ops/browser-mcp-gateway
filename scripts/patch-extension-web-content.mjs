@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const MARKER = 'BMG_WEB_CONTENT_FALLBACK_V1';
 const INTERACTIVE_MARKER = 'BMG_INTERACTIVE_WORKSPACE_TARGET_V1';
 const WINDOW_GEOMETRY_MARKER = 'BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1';
+const URL_PATTERN_MARKER = 'BMG_SAFE_URL_PATTERN_HOSTS_V1';
 const CLASS_ANCHOR = '  class WebFetcherTool extends BaseBrowserToolExecutor {';
 const HELPER_OLD = "const pingActions = ['search_tabs_content_ping', 'chrome_web_fetcher_ping'];";
 const HELPER_NEW =
@@ -60,6 +61,28 @@ const WINDOW_CREATE_NEW = `            // ${WINDOW_GEOMETRY_MARKER}
             if (typeof width === "number") createWindowOptions.width = width;
             if (typeof height === "number") createWindowOptions.height = height;
             const newWindow2 = yield chrome.windows.create(createWindowOptions);`;
+const URL_PATTERN_OLD = `                const hostNoWww = u.host.replace(/^www\\./, "");
+                const hostWithWww = hostNoWww.startsWith("www.") ? hostNoWww : \`www.\${hostNoWww}\`;
+                patterns2.add(\`\${u.protocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostWithWww}\${pathWildcard}\`);
+                const altProtocol = u.protocol === "https:" ? "http:" : "https:";
+                patterns2.add(\`\${altProtocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostWithWww}\${pathWildcard}\`);`;
+const URL_PATTERN_NEW = `                // ${URL_PATTERN_MARKER}
+                const hostNoWww = u.host.replace(/^www\\./, "");
+                const hostnameNoWww = u.hostname.replace(/^www\\./, "");
+                const isIpLiteral = /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(hostnameNoWww) || hostnameNoWww.includes(":");
+                const hostWithWww =
+                  hostnameNoWww !== "localhost" && !isIpLiteral ? \`www.\${hostNoWww}\` : null;
+                patterns2.add(\`\${u.protocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostNoWww}\${pathWildcard}\`);
+                if (hostWithWww) patterns2.add(\`\${u.protocol}//\${hostWithWww}\${pathWildcard}\`);
+                const altProtocol = u.protocol === "https:" ? "http:" : "https:";
+                patterns2.add(\`\${altProtocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostNoWww}\${pathWildcard}\`);
+                if (hostWithWww) patterns2.add(\`\${altProtocol}//\${hostWithWww}\${pathWildcard}\`);`;
 const FALLBACK_HELPER = `  // ${MARKER}
   function webContentMessageWithFallback(tool, tabId, action, selector, asHtml) {
     return __async(this, null, function* () {
@@ -120,6 +143,10 @@ export function patchWebContentBackgroundText(text) {
   }
   if (!next.includes(WINDOW_GEOMETRY_MARKER)) {
     next = replaceExactlyOnce(next, WINDOW_CREATE_OLD, WINDOW_CREATE_NEW, 'new-window geometry');
+    changed = true;
+  }
+  if (!next.includes(URL_PATTERN_MARKER)) {
+    next = replaceExactlyOnce(next, URL_PATTERN_OLD, URL_PATTERN_NEW, 'safe URL patterns');
     changed = true;
   }
   return { text: next, changed };
