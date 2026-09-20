@@ -15,6 +15,9 @@ import {
   patchWebContentBackgroundText,
   patchWebContentHelperText,
 } from '../scripts/patch-extension-web-content.mjs';
+import {
+  patchNavigationBackgroundText,
+} from '../scripts/patch-extension-navigation.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
 const RESOURCE = 'https://bmg.example.test/bmg/mcp';
@@ -1611,4 +1614,95 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
   for (const tool of workspaceLocalToolsForTest) {
     assert.deepEqual(tool.inputSchema, { type: 'object', properties: {}, additionalProperties: false });
   }
+});
+
+
+test('navigation patch keeps BMG browser work background-first and waits for settled URLs', () => {
+  const background = readTextFile('extension/background.js');
+  assert.match(background, /BMG_DEFAULT_BACKGROUND_V1/u);
+  assert.match(background, /BMG_NAVIGATION_SETTLE_V1/u);
+  assert.match(background, /background: background2 = true/u);
+  assert.match(background, /const background2 = args\.background !== false;/u);
+  assert.match(background, /bmgWaitForNavigation\(\s*explicitTab\.id, url, previousUrl/u);
+  assert.match(background, /bmgWaitForNavigation\(newTab\.id, url/u);
+  assert.match(background, /focused: background2 === true \? false : true/u);
+  assert.doesNotMatch(
+    background,
+    /const \{ url, type, jsScript, tabId, windowId, background: background2 \} = args;/u,
+  );
+  const second = patchNavigationBackgroundText(background);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, background);
+
+  const setup = readTextFile('scripts/setup.ps1');
+  assert.match(setup, /patch-extension-navigation\.mjs/u);
+});
+
+test('workspace defaults browser tools to background but preserves explicit foreground intent', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-background-default-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const transitions = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile: path.join(rootDir, 'workspace.json'),
+    bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
+    claimWindow: async () => ({ hwnd: 8803 }),
+    showWindow: async (hwnd) => {
+      transitions.push(['show', hwnd]);
+      return { hwnd, visible: true, foreground: true };
+    },
+    ensureWindowHidden: async (hwnd) => {
+      transitions.push(['hide', hwnd]);
+      return { hwnd, visible: false, hidden: true };
+    },
+    callTool: async (name, args) => {
+      if (name === 'chrome_navigate' && args.newWindow === true) {
+        return workspaceToolMessage({
+          success: true,
+          windowId: 8801,
+          tabs: [{ tabId: 8802, url: args.url }],
+        });
+      }
+      if (name === 'get_windows_and_tabs') {
+        return workspaceToolMessage({
+          windows: [{ windowId: 8801, tabs: [{ tabId: 8802, active: true }] }],
+        });
+      }
+      throw new Error('Unexpected internal tool call: ' + name);
+    },
+  });
+
+  const foreground = await router.rewrite({
+    method: 'tools/call',
+    params: {
+      name: 'chrome_navigate',
+      arguments: { url: 'https://example.com/front', background: false },
+    },
+  });
+  assert.equal(foreground.params.arguments.background, false);
+  assert.deepEqual(transitions, [['show', 8803]]);
+  assert.equal(router.visible, true);
+
+  await router.observe(
+    foreground,
+    workspaceToolMessage({ success: true, windowId: 8801, tabId: 8802 }),
+  );
+  assert.deepEqual(transitions, [['show', 8803]]);
+  assert.equal(router.visible, true);
+
+  const background = await router.rewrite({
+    method: 'tools/call',
+    params: {
+      name: 'chrome_get_web_content',
+      arguments: { textContent: true },
+    },
+  });
+  assert.equal(background.params.arguments.background, true);
+
+  await router.observe(
+    background,
+    workspaceToolMessage({ success: true, textContent: 'ok' }),
+  );
+  assert.deepEqual(transitions, [['show', 8803], ['hide', 8803]]);
+  assert.equal(router.visible, false);
 });

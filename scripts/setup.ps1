@@ -167,10 +167,11 @@ New-Item -ItemType Directory -Path $extensionDir -Force | Out-Null
 $manifestDir = Split-Path -Parent $manifest.FullName
 Get-ChildItem -LiteralPath $manifestDir -Force | Copy-Item -Destination $extensionDir -Recurse -Force
 
-Write-Output "Applying BMG web-content stability patch..."
+Write-Output "Applying BMG browser stability patches..."
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-web-content.mjs") $extensionDir
+& $node.Source (Join-Path $PSScriptRoot "patch-extension-navigation.mjs") $extensionDir
 if ($LASTEXITCODE -ne 0) {
-    throw "BMG web-content extension patch failed."
+    throw "BMG browser extension stability patch failed."
 }
 
 Write-Output ""

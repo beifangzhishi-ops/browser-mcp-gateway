@@ -244,9 +244,9 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
-在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，`chrome_close_tabs` 也会被收窄到工作区标签页，避免默认选中普通前台 Edge 窗口。
+在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，`chrome_close_tabs` 也会被收窄到工作区标签页，避免默认选中普通前台 Edge 窗口。页面工具的 `background` 语义为后台优先：调用方未指定时按 `true` 处理，不激活标签页或聚焦窗口；只有显式传入 `background:false` 才会显示并保持该工作区可见。URL 导航在返回成功前会等待目标 URL（或实际重定向 URL）进入稳定完成状态，避免紧接着的 DOM 调用打到旧页面。
 
-正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸，只有显式调用 `bmg_show_workspace` 时才尝试前台激活。页面自动化恢复后，BMG 会再次把同一个 ownership-verified 工作区真正隐藏。
+正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸；显式调用 `bmg_show_workspace`，或对支持后台参数的页面工具显式传入 `background:false`，才允许前台激活。后续恢复为默认后台的页面自动化后，BMG 会再次把同一个 ownership-verified 工作区真正隐藏。
 
 新工作区创建不再传固定的 480×360 尺寸。受 Git 管理的 `scripts/patch-extension-web-content.mjs` 还会补丁上游 `chrome_navigate`：调用方未指定宽高时，`chrome.windows.create` 不再自动补入上游默认的 1280×720；同时对 `127.0.0.1`、IPv6 和 `localhost` 不再生成非法的 `www.` URL pattern，避免本地 bootstrap URL 在创建窗口前被上游导航逻辑拒绝。这样 BMG 不再通过固定小窗口或屏幕外坐标持续覆盖共享 Edge 的普通窗口几何。旧的 v1 工作区状态没有可验证 marker，会被安全退休；不会凭旧 HWND 去移动、显示或关闭旧窗口。因此其他机器若仍保留由 v1 对应的旧窗口，该窗口可能继续存在到用户关闭它或 Edge 重启，BMG 不会为了去重而猜测归属后强行清理。
 
@@ -256,7 +256,7 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` 控制自动清理，默认 `1800` 秒。浏览器工具活动会刷新期限；到期后 BMG 重新验证 ownership，导航工作区标签页到 `about:blank`，只关闭同一受控窗口中的额外标签页，并保留一个真正隐藏的空白标签页。设置为 `0` 可禁用空闲清理。读历史、书签、窗口列表等全局工具仍不是 window-scoped。
 
-自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、人工显示后恢复隐藏、截图参数绑定，以及扩展补丁幂等；`npm.cmd test` 当前为 29/29 通过。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。整页／元素截图和实际重启登录验收仍未执行，不能用单元测试替代。
+自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、默认后台与显式前台语义、人工显示后恢复隐藏、截图参数绑定、导航 settle，以及扩展补丁幂等；`npm.cmd test` 当前为 31/31 通过。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。整页／元素截图和实际重启登录验收仍未执行，不能用单元测试替代。
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 
