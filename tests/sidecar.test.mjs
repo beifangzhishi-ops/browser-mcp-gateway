@@ -1698,11 +1698,17 @@ test('workspace defaults browser tools to background but preserves explicit fore
     },
   });
   assert.equal(background.params.arguments.background, true);
+  assert.deepEqual(transitions, [['show', 8803], ['hide', 8803]]);
+  assert.equal(router.visible, false);
 
   await router.observe(
     background,
     workspaceToolMessage({ success: true, textContent: 'ok' }),
   );
-  assert.deepEqual(transitions, [['show', 8803], ['hide', 8803]]);
+  assert.deepEqual(transitions, [
+    ['show', 8803],
+    ['hide', 8803],
+    ['hide', 8803],
+  ]);
   assert.equal(router.visible, false);
 });

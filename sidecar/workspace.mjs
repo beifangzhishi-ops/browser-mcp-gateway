@@ -572,15 +572,22 @@ export class BrowserWorkspaceRouter {
     } else {
       args.tabId = workspace.tabId;
       args.windowId = workspace.windowId;
+      const isBackgroundTool = BACKGROUND_TOOLS.has(name);
       const foregroundRequested =
-        BACKGROUND_TOOLS.has(name) && args.background === false;
-      if (BACKGROUND_TOOLS.has(name) && args.background === undefined) {
+        isBackgroundTool && args.background === false;
+      if (isBackgroundTool && args.background === undefined) {
         args.background = true;
       }
+      const backgroundRequested =
+        isBackgroundTool && args.background !== false;
       if (foregroundRequested && this.hwnd && this.windowMarker) {
         const shown = await this.showWindow(this.hwnd, this.windowMarker);
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
+      } else if (backgroundRequested && this.visible && this.hwnd && this.windowMarker) {
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        this.updateWindowIdentity(hidden);
+        this.remember(workspace.windowId, workspace.tabId, this.hwnd, false);
       }
       if (name === 'chrome_navigate') {
         args.newWindow = false;
