@@ -54,6 +54,22 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 
 本机工作区检查接口 `/internal/ensure-workspace` 仅接受匹配本机地址、无浏览器 Origin 且携带本机认证密钥的 POST 请求，使用 sidecar 自身的共享上游会话。密钥从本地文件读取，不出现在启动参数或日志中。更新该功能后，已运行的 sidecar 需重启以加载新接口。
 
+### Local automation client
+
+`bmgctl` is the supported local boundary for external automation such as CCM. It keeps BMG's approval secret and workspace routing inside the BMG repository/process and exposes JSON-only commands:
+
+```powershell
+.\bmgctl.cmd health
+.\bmgctl.cmd workspace
+.\bmgctl.cmd call chrome_navigate --args '{"url":"https://chatgpt.com"}'
+.\bmgctl.cmd show
+.\bmgctl.cmd hide
+```
+
+`call` uses `/internal/tool-call`, which has the same loopback/no-Origin/local-secret protection as `/internal/ensure-workspace`. Page operations are rewritten through the workspace router and therefore target the dedicated BMG GPT workspace rather than an arbitrary normal Edge tab. External consumers should call `bmgctl`; they should not read BMG OAuth state, the approval-secret file, or private `/internal/*` implementation details directly.
+
+The repository also declares `bmgctl` as its package `bin`, so `npm link` can expose the command on PATH. Consumers that do not use PATH may point directly at `bmgctl.cmd`.
+
 如需移除：
 
 ```powershell

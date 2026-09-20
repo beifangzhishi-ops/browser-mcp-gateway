@@ -49,6 +49,43 @@ test('本机启动检查拒绝未授权请求并报告工作区未启用', async
   assert.equal(fixture.fakeUpstream.calls.length, 0);
 });
 
+test('本机 tool-call 需要本机密钥并通过共享 MCP 会话执行', async (t) => {
+  const fixture = await createTestRuntime();
+  fixture.runtime.workspace.enabled = true;
+  fixture.runtime.workspace.ensureWorkspace = async () => ({
+    windowId: 101,
+    tabId: 202,
+    hwnd: 303,
+    visible: false,
+  });
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+  const body = JSON.stringify({ name: 'safe_ping', arguments: {} });
+  const denied = await requestJson(fixture.baseUrl, '/internal/tool-call', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+  });
+  assert.equal(denied.response.status, 403);
+  const result = await requestJson(fixture.baseUrl, '/internal/tool-call', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-BMG-Local-Secret': APPROVAL_SECRET,
+    },
+    body,
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.json.success, true);
+  assert.equal(result.json.name, 'safe_ping');
+  assert.equal(result.json.result.content[0].text, 'pong from 12306');
+  const upstreamCall = fixture.fakeUpstream.calls.find(
+    (call) => call.payload?.method === 'tools/call',
+  );
+  assert.equal(upstreamCall.payload.params.name, 'safe_ping');
+});
+
 test('启动检查初始化共享会话、合并并发请求并重建已关闭工作区', async (t) => {
   const fixture = await createTestRuntime({ initializeDelayMs: 20 });
   const router = fixture.runtime.workspace;

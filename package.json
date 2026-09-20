@@ -5,6 +5,9 @@
   "license": "MIT",
   "description": "Browser MCP Gateway 的独立 OAuth sidecar",
   "type": "module",
+  "bin": {
+    "bmgctl": "./scripts/bmgctl.mjs"
+  },
   "engines": {
     "node": ">=20"
   },

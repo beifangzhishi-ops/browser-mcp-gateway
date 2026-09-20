@@ -12,10 +12,12 @@ $existing = Get-Process -Name msedge -ErrorAction SilentlyContinue |
 if ($null -ne $existing) { return }
 
 $candidates = @(
-    (Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"),
-    (Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"),
-    (Join-Path $env:LOCALAPPDATA "Microsoft\Edge\Application\msedge.exe")
-)
+    ${env:ProgramFiles(x86)},
+    $env:ProgramFiles,
+    $env:LOCALAPPDATA
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+    Join-Path $_ "Microsoft\Edge\Application\msedge.exe"
+}
 $edge = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $edge) { throw "Microsoft Edge executable was not found." }
 

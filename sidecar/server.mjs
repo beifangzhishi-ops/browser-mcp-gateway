@@ -1226,18 +1226,67 @@ async function handleProtectedMcp(request, response, runtime, url) {
   }
 }
 
+function isAuthorizedLocalControlRequest(request, runtime) {
+  const address = runtime.server.address();
+  const localHost = `127.0.0.1:${address.port}`;
+  return (
+    request.method === 'POST' &&
+    request.socket.remoteAddress === '127.0.0.1' &&
+    request.headers.host === localHost &&
+    request.headers.origin === undefined &&
+    constantTimeEqual(request.headers['x-bmg-local-secret'] || '', runtime.approvalSecret)
+  );
+}
+
+async function ensureWorkspaceReady(runtime, { revalidate = false } = {}) {
+  await runtime.upstreamSession.initializeFromRequest({
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+  }, {
+    jsonrpc: '2.0', id: 'bmg-local-control', method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26', capabilities: {},
+      clientInfo: { name: 'bmg-local-control', version: '1.0.0' },
+    },
+  });
+  runtime.workspace.markActivity();
+  return runtime.workspace.ensureWorkspace({ revalidate });
+}
+
+async function callWorkspaceTool(runtime, name, args = {}) {
+  await ensureWorkspaceReady(runtime);
+  if (WORKSPACE_LOCAL_TOOL_NAMES.has(name)) {
+    if (name === 'bmg_show_workspace') return runtime.workspace.showWorkspace();
+    return runtime.workspace.hideWorkspace();
+  }
+  const payload = {
+    jsonrpc: '2.0',
+    id: `bmg-local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  };
+  const forwardedPayload = await runtime.workspace.rewrite(payload);
+  const body = JSON.stringify(forwardedPayload);
+  const upstreamResponse = await runtime.upstreamSession.request(
+    { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    new URL(MCP_PATH, 'http://127.0.0.1'),
+    body,
+  );
+  if (upstreamResponse.statusCode !== 200) {
+    throw new UpstreamHttpError('Upstream local tool call failed.', upstreamResponse);
+  }
+  const message = parseUpstreamMessage(upstreamResponse.body);
+  if (!message || message.error || !message.result) {
+    throw new Error('Upstream local tool call returned an invalid response.');
+  }
+  await runtime.workspace.observe(forwardedPayload, message);
+  return message.result;
+}
+
 async function handleRequest(request, response, runtime) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
   if (url.pathname === '/internal/ensure-workspace') {
-    const address = runtime.server.address();
-    const localHost = `127.0.0.1:${address.port}`;
-    if (
-      request.method !== 'POST' ||
-      request.socket.remoteAddress !== '127.0.0.1' ||
-      request.headers.host !== localHost ||
-      request.headers.origin !== undefined ||
-      !constantTimeEqual(request.headers['x-bmg-local-secret'] || '', runtime.approvalSecret)
-    ) {
+    if (!isAuthorizedLocalControlRequest(request, runtime)) {
       sendJson(response, 403, { error: 'forbidden' }, { noStore: true });
       return;
     }
@@ -1247,22 +1296,48 @@ async function handleRequest(request, response, runtime) {
     }
     try {
       if (!runtime.preparingWorkspace) {
-        runtime.preparingWorkspace = (async () => {
-          await runtime.upstreamSession.initializeFromRequest({}, {
-            jsonrpc: '2.0', id: 'bmg-startup', method: 'initialize',
-            params: {
-              protocolVersion: '2025-03-26', capabilities: {},
-              clientInfo: { name: 'bmg-startup', version: '1.0.0' },
-            },
-          });
-          runtime.workspace.markActivity();
-          return runtime.workspace.ensureWorkspace({ revalidate: true });
-        })().finally(() => { runtime.preparingWorkspace = null; });
+        runtime.preparingWorkspace = ensureWorkspaceReady(
+          runtime,
+          { revalidate: true },
+        ).finally(() => { runtime.preparingWorkspace = null; });
       }
       const workspace = await runtime.preparingWorkspace;
       sendJson(response, 200, { success: true, workspace }, { noStore: true });
     } catch {
       sendJson(response, 503, { error: 'workspace_unavailable' }, { noStore: true });
+    }
+    return;
+  }
+  if (url.pathname === '/internal/tool-call') {
+    if (!isAuthorizedLocalControlRequest(request, runtime)) {
+      sendJson(response, 403, { error: 'forbidden' }, { noStore: true });
+      return;
+    }
+    if (!runtime.workspace.enabled) {
+      sendJson(response, 409, { error: 'workspace_disabled' }, { noStore: true });
+      return;
+    }
+    try {
+      const payload = await readJson(request);
+      const name = typeof payload?.name === 'string' ? payload.name.trim() : '';
+      const args = payload?.arguments;
+      if (!name || (args !== undefined && (!args || typeof args !== 'object' || Array.isArray(args)))) {
+        sendJson(response, 400, { error: 'invalid_tool_call' }, { noStore: true });
+        return;
+      }
+      const result = await callWorkspaceTool(runtime, name, args || {});
+      sendJson(response, 200, { success: true, name, result }, { noStore: true });
+    } catch (error) {
+      if (error instanceof UpstreamHttpError) {
+        sendJson(response, 502, { error: 'upstream_tool_call_failed' }, { noStore: true });
+      } else {
+        sendJson(
+          response,
+          502,
+          { error: 'tool_call_failed', message: String(error?.message || error) },
+          { noStore: true },
+        );
+      }
     }
     return;
   }
