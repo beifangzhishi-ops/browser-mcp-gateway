@@ -66,7 +66,7 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 .\bmgctl.cmd hide
 ```
 
-`call` uses `/internal/tool-call`, which has the same loopback/no-Origin/local-secret protection as `/internal/ensure-workspace`. Page operations are rewritten through the workspace router and therefore target the dedicated BMG GPT workspace rather than an arbitrary normal Edge tab. External consumers should call `bmgctl`; they should not read BMG OAuth state, the approval-secret file, or private `/internal/*` implementation details directly.
+`call` uses `/internal/tool-call`, which has the same loopback/no-Origin/local-secret protection as `/internal/ensure-workspace`. Page operations are rewritten through the workspace router and therefore target the dedicated BMG GPT workspace rather than an arbitrary normal Edge tab. Ref-based automation tools such as `chrome_read_page` and CDP-backed `chrome_computer` are routed through the same dedicated workspace. External consumers should call `bmgctl`; they should not read BMG OAuth state, the approval-secret file, or private `/internal/*` implementation details directly.
 
 The repository also declares `bmgctl` as its package `bin`, so `npm link` can expose the command on PATH. Consumers that do not use PATH may point directly at `bmgctl.cmd`.
 

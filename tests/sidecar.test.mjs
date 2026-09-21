@@ -1370,6 +1370,26 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(rewrittenUpload.params.arguments.windowId, 7001);
   assert.equal(rewrittenUpload.params.arguments.tabId, 7002);
   assert.equal(rewrittenUpload.params.arguments.selector, '#upload');
+
+  const rewrittenReadPage = await router.rewrite({
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools/call',
+    params: { name: 'chrome_read_page', arguments: {} },
+  });
+  assert.equal(rewrittenReadPage.params.arguments.windowId, 7001);
+  assert.equal(rewrittenReadPage.params.arguments.tabId, 7002);
+  assert.equal('background' in rewrittenReadPage.params.arguments, false);
+
+  const rewrittenComputer = await router.rewrite({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools/call',
+    params: { name: 'chrome_computer', arguments: { action: 'left_click', ref: 'ref_9' } },
+  });
+  assert.equal(rewrittenComputer.params.arguments.windowId, 7001);
+  assert.equal(rewrittenComputer.params.arguments.tabId, 7002);
+  assert.equal(rewrittenComputer.params.arguments.background, true);
 });
 
 test('workspace router narrows close-tabs to the GPT tab', async (t) => {
