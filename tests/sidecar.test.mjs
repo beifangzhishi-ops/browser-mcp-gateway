@@ -18,12 +18,36 @@ import {
 import {
   patchNavigationBackgroundText,
 } from '../scripts/patch-extension-navigation.mjs';
+import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
 const RESOURCE = 'https://bmg.example.test/bmg/mcp';
 const PROTECTED_METADATA =
   'https://bmg.example.test/.well-known/oauth-protected-resource/bmg/mcp';
 const APPROVAL_SECRET = 'unit-test-approval-secret';
+
+test('bmgctl propagates nested MCP tool failures', () => {
+  assert.equal(toolCallFailed({ result: { isError: true } }), true);
+  assert.equal(toolCallFailed({
+    result: {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: 'success',
+          data: { isError: true, content: [{ type: 'text', text: 'click failed' }] },
+        }),
+      }],
+    },
+  }), true);
+  assert.equal(toolCallFailed({
+    result: {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ status: 'success', data: { isError: false } }),
+      }],
+    },
+  }), false);
+});
 
 test('本机启动检查拒绝未授权请求并报告工作区未启用', async (t) => {
   const fixture = await createTestRuntime();

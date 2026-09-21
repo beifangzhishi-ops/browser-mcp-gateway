@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../sidecar/config.mjs';
+import { toolCallFailed } from './bmgctl-result.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -116,4 +117,4 @@ const result = await requestJson(baseUrl, '/internal/tool-call', {
   body: JSON.stringify({ name: toolName, arguments: toolArgs }),
 });
 print(result);
-if (result?.result?.isError === true) process.exitCode = 1;
+if (toolCallFailed(result)) process.exitCode = 1;
