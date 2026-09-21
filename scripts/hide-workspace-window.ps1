@@ -61,14 +61,22 @@ $SWP_NOACTIVATE = 0x0010
 $SWP_FRAMECHANGED = 0x0020
 $FLASHW_STOP = 0x00000000
 
-function Clear-BmgWindowAttention([IntPtr]$Hwnd) {
-    $flash = New-Object BmgWorkspaceWin32+FLASHWINFO
-    $flash.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][BmgWorkspaceWin32+FLASHWINFO])
-    $flash.hwnd = $Hwnd
-    $flash.dwFlags = $FLASHW_STOP
-    $flash.uCount = 0
-    $flash.dwTimeout = 0
-    [void][BmgWorkspaceWin32]::FlashWindowEx([ref]$flash)
+function Clear-BmgProcessAttention([uint32]$ProcessId) {
+    [BmgWorkspaceWin32]::EnumWindows({
+        param([IntPtr]$hWnd, [IntPtr]$lParam)
+        [uint32]$windowProcessId = 0
+        [void][BmgWorkspaceWin32]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId)
+        if ($windowProcessId -eq $ProcessId) {
+            $flash = New-Object BmgWorkspaceWin32+FLASHWINFO
+            $flash.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][BmgWorkspaceWin32+FLASHWINFO])
+            $flash.hwnd = $hWnd
+            $flash.dwFlags = $FLASHW_STOP
+            $flash.uCount = 0
+            $flash.dwTimeout = 0
+            [void][BmgWorkspaceWin32]::FlashWindowEx([ref]$flash)
+        }
+        return $true
+    }, [IntPtr]::Zero) | Out-Null
 }
 
 function Get-BmgWindowInfo([IntPtr]$Hwnd) {
@@ -161,7 +169,7 @@ do {
             throw "SetWindowPos failed while applying BMG workspace window style."
         }
         [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
-        Clear-BmgWindowAttention $target
+        Clear-BmgProcessAttention ([uint32]$before.processId)
         Start-Sleep -Milliseconds 80
         $after = Get-BmgWindowInfo $target
         if ($after.visible -or $after.minimized) {

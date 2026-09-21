@@ -1677,7 +1677,8 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   const script = readTextFile('scripts/hide-workspace-window.ps1');
   assert.match(script, /FlashWindowEx/u);
   assert.match(script, /FLASHW_STOP/u);
-  assert.match(script, /Clear-BmgWindowAttention \$target/u);
+  assert.match(script, /Clear-BmgProcessAttention \(\[uint32\]\$before\.processId\)/u);
+  assert.match(script, /GetWindowThreadProcessId\(\$hWnd, \[ref\]\$windowProcessId\)/u);
   assert.match(script, /WS_EX_TOOLWINDOW/u);
   assert.match(script, /WS_EX_APPWINDOW/u);
   assert.match(script, /ParameterSetName = 'Hwnd'/u);
