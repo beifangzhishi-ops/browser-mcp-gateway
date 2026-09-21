@@ -581,6 +581,10 @@ export class BrowserWorkspaceRouter {
       if (isBackgroundTool && args.background === undefined) {
         args.background = true;
       }
+      if (name === 'chrome_screenshot') {
+        if (args.savePng === undefined) args.savePng = false;
+        if (args.storeBase64 === undefined) args.storeBase64 = true;
+      }
       const backgroundRequested =
         isBackgroundTool && args.background !== false;
       if (foregroundRequested && this.hwnd && this.windowMarker) {

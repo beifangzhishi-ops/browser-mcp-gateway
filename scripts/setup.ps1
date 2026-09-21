@@ -169,6 +169,7 @@ Get-ChildItem -LiteralPath $manifestDir -Force | Copy-Item -Destination $extensi
 
 Write-Output "Applying BMG browser stability patches..."
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-web-content.mjs") $extensionDir
+& $node.Source (Join-Path $PSScriptRoot "patch-extension-content-cdp.mjs") $extensionDir
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-navigation.mjs") $extensionDir
 if ($LASTEXITCODE -ne 0) {
     throw "BMG browser extension stability patch failed."

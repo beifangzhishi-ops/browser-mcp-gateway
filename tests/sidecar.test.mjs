@@ -18,6 +18,9 @@ import {
 import {
   patchNavigationBackgroundText,
 } from '../scripts/patch-extension-navigation.mjs';
+import {
+  patchContentCdpBackgroundText,
+} from '../scripts/patch-extension-content-cdp.mjs';
 import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
@@ -983,6 +986,46 @@ const textResponse = yield this.sendMessageToTab(tab.id, {
                 patterns2.add(\`\${altProtocol}//\${u.host}\${pathWildcard}\`);
                 patterns2.add(\`\${altProtocol}//\${hostNoWww}\${pathWildcard}\`);
                 patterns2.add(\`\${altProtocol}//\${hostWithWww}\${pathWildcard}\`);
+  class ComputerTool extends BaseBrowserToolExecutor {
+    demo() {
+      yield clickTool.execute({
+        ref: one,
+      });
+      yield clickTool.execute({
+        selector: two,
+      });
+            const coord = project(params.coordinates);
+            const domResult = yield clickTool.execute({
+              coordinates: coord,
+              waitForNavigation: false,
+              timeout: TIMEOUTS.DEFAULT_WAIT * 5,
+              button: params.action === "right_click" ? "right" : "left",
+              modifiers: params.modifiers
+            });
+            if (!domResult.isError) {
+              return domResult;
+            }
+            try {
+            }
+      yield clickTool.execute({
+        ref: four,
+      });
+      yield clickTool.execute({
+        ref: five,
+      });
+      yield fillTool.execute({
+        ref: six,
+      });
+      yield fillTool.execute({
+        ref: seven,
+      });
+      yield keyboardTool.execute({
+        keys: eight,
+      });
+      yield keyboardTool.execute({ keys: repeatedKeys });
+    }
+  }
+  const computerTool = new ComputerTool();
 suffix`;
   const first = patchWebContentBackgroundText(backgroundFixture);
   assert.equal(first.changed, true);
@@ -990,6 +1033,8 @@ suffix`;
   assert.match(first.text, /BMG_INTERACTIVE_WORKSPACE_TARGET_V1/u);
   assert.match(first.text, /BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1/u);
   assert.match(first.text, /BMG_SAFE_URL_PATTERN_HOSTS_V1/u);
+  assert.match(first.text, /BMG_COMPUTER_TARGET_TAB_V1/u);
+  assert.match(first.text, /BMG_COMPUTER_COORDINATE_CDP_V1/u);
   assert.match(first.text, /hostnameNoWww !== "localhost" && !isIpLiteral/u);
   assert.match(first.text, /if \(hostWithWww\) patterns2\.add/u);
   assert.match(first.text, /chrome\.windows\.create\(createWindowOptions\)/u);
@@ -1007,6 +1052,23 @@ suffix`;
 
   const setup = readTextFile('scripts/setup.ps1');
   assert.match(setup, /patch-extension-web-content\.mjs/u);
+});
+
+test('content CDP fallback patch is deterministic and wired into setup', () => {
+  const background = readTextFile('extension/background.js');
+  assert.match(background, /BMG_CDP_CONTENT_FALLBACK_V1/u);
+  assert.match(background, /BMG_CDP_INTERACTION_FALLBACK_V1/u);
+  assert.match(background, /bmgWebContentWithCdpFallback/u);
+  assert.match(background, /bmgInteractiveWithCdpFallback/u);
+  assert.match(background, /bmgCdpClickSelector/u);
+  assert.match(background, /bmgCdpFillSelector/u);
+  assert.match(background, /read page accessibility helper/u);
+  assert.match(background, /Runtime\.evaluate/u);
+  const second = patchContentCdpBackgroundText(background);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, background);
+  const setup = readTextFile('scripts/setup.ps1');
+  assert.match(setup, /patch-extension-content-cdp\.mjs/u);
 });
 
 function workspaceToolMessage(data, isError = false) {
@@ -1200,6 +1262,8 @@ test('workspace request performs finite browser recovery and claims the recovere
   assert.equal(rewritten.params.arguments.windowId, 9701);
   assert.equal(rewritten.params.arguments.tabId, 9702);
   assert.equal(rewritten.params.arguments.background, true);
+  assert.equal(rewritten.params.arguments.savePng, false);
+  assert.equal(rewritten.params.arguments.storeBase64, true);
 });
 
 test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
@@ -1348,6 +1412,24 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(rewrittenRead.params.arguments.tabId, 7002);
   assert.equal(rewrittenRead.params.arguments.background, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(rootDir, 'workspace.json'), 'utf8')).hwnd, 7003);
+
+  const defaultShot = await router.rewrite({
+    jsonrpc: '2.0',
+    id: 11,
+    method: 'tools/call',
+    params: { name: 'chrome_screenshot', arguments: { fullPage: false } },
+  });
+  assert.equal(defaultShot.params.arguments.savePng, false);
+  assert.equal(defaultShot.params.arguments.storeBase64, true);
+
+  const explicitSave = await router.rewrite({
+    jsonrpc: '2.0',
+    id: 12,
+    method: 'tools/call',
+    params: { name: 'chrome_screenshot', arguments: { savePng: true, storeBase64: false } },
+  });
+  assert.equal(explicitSave.params.arguments.savePng, true);
+  assert.equal(explicitSave.params.arguments.storeBase64, false);
 
   const rewrittenNavigate = await router.rewrite({
     jsonrpc: '2.0',
@@ -1593,6 +1675,9 @@ test('post-navigation hide maintenance failure does not turn a browser success i
 
 test('workspace Win32 helpers true-hide only ownership-verified HWNDs without moving geometry', () => {
   const script = readTextFile('scripts/hide-workspace-window.ps1');
+  assert.match(script, /FlashWindowEx/u);
+  assert.match(script, /FLASHW_STOP/u);
+  assert.match(script, /Clear-BmgWindowAttention \$target/u);
   assert.match(script, /WS_EX_TOOLWINDOW/u);
   assert.match(script, /WS_EX_APPWINDOW/u);
   assert.match(script, /ParameterSetName = 'Hwnd'/u);
@@ -1717,6 +1802,27 @@ test('navigation patch keeps BMG browser work background-first and waits for set
 
   const setup = readTextFile('scripts/setup.ps1');
   assert.match(setup, /patch-extension-navigation\.mjs/u);
+});
+
+test('web-content patch keeps chrome_computer delegated actions on the selected workspace tab', () => {
+  const background = readTextFile('extension/background.js');
+  assert.match(background, /BMG_COMPUTER_TARGET_TAB_V1/u);
+  const start = background.indexOf('  class ComputerTool extends BaseBrowserToolExecutor {');
+  const end = background.indexOf('  const computerTool = new ComputerTool();', start);
+  assert.ok(start >= 0 && end > start);
+  const block = background.slice(start, end);
+  const delegates = [...block.matchAll(/yield (?:clickTool|fillTool|keyboardTool)\.execute\(\{/gu)];
+  assert.equal(delegates.length, 8);
+  const routedDelegates = [...block.matchAll(/yield (?:clickTool|fillTool|keyboardTool)\.execute\(\{\r?\n\s*tabId: tab\.id,\r?\n\s*windowId: tab\.windowId,/gu)];
+  assert.equal(routedDelegates.length, 7);
+  assert.match(block, /BMG_COMPUTER_COORDINATE_CDP_V1/u);
+  assert.match(
+    block,
+    /keyboardTool\.execute\(\{ tabId: tab\.id, windowId: tab\.windowId, keys: repeatedKeys \}\)/u,
+  );
+  const second = patchWebContentBackgroundText(background);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, background);
 });
 
 test('workspace defaults browser tools to background but preserves explicit foreground intent', async (t) => {

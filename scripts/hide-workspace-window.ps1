@@ -27,6 +27,13 @@ using System.Runtime.InteropServices;
 public static class BmgWorkspaceWin32 {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct FLASHWINFO {
+        public uint cbSize;
+        public IntPtr hwnd;
+        public uint dwFlags;
+        public uint uCount;
+        public uint dwTimeout;
+    }
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
@@ -38,6 +45,7 @@ public static class BmgWorkspaceWin32 {
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll", EntryPoint="SetWindowLongPtrW")] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr GetProp(IntPtr hWnd, string lpString);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetProp(IntPtr hWnd, string lpString, IntPtr hData);
 }
@@ -51,6 +59,17 @@ $SWP_NOMOVE = 0x0002
 $SWP_NOZORDER = 0x0004
 $SWP_NOACTIVATE = 0x0010
 $SWP_FRAMECHANGED = 0x0020
+$FLASHW_STOP = 0x00000000
+
+function Clear-BmgWindowAttention([IntPtr]$Hwnd) {
+    $flash = New-Object BmgWorkspaceWin32+FLASHWINFO
+    $flash.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][BmgWorkspaceWin32+FLASHWINFO])
+    $flash.hwnd = $Hwnd
+    $flash.dwFlags = $FLASHW_STOP
+    $flash.uCount = 0
+    $flash.dwTimeout = 0
+    [void][BmgWorkspaceWin32]::FlashWindowEx([ref]$flash)
+}
 
 function Get-BmgWindowInfo([IntPtr]$Hwnd) {
     if (-not [BmgWorkspaceWin32]::IsWindow($Hwnd)) {
@@ -142,6 +161,7 @@ do {
             throw "SetWindowPos failed while applying BMG workspace window style."
         }
         [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
+        Clear-BmgWindowAttention $target
         Start-Sleep -Milliseconds 80
         $after = Get-BmgWindowInfo $target
         if ($after.visible -or $after.minimized) {

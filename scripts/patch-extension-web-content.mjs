@@ -6,6 +6,8 @@ const MARKER = 'BMG_WEB_CONTENT_FALLBACK_V1';
 const INTERACTIVE_MARKER = 'BMG_INTERACTIVE_WORKSPACE_TARGET_V1';
 const WINDOW_GEOMETRY_MARKER = 'BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1';
 const URL_PATTERN_MARKER = 'BMG_SAFE_URL_PATTERN_HOSTS_V1';
+const COMPUTER_TARGET_TAB_MARKER = 'BMG_COMPUTER_TARGET_TAB_V1';
+const COMPUTER_COORDINATE_CDP_MARKER = 'BMG_COMPUTER_COORDINATE_CDP_V1';
 const CLASS_ANCHOR = '  class WebFetcherTool extends BaseBrowserToolExecutor {';
 const HELPER_OLD = "const pingActions = ['search_tabs_content_ping', 'chrome_web_fetcher_ping'];";
 const HELPER_NEW =
@@ -127,6 +129,64 @@ function replaceExactlyOnce(text, oldText, newText, label) {
   return text.slice(0, first) + newText + text.slice(first + oldText.length);
 }
 
+function patchComputerTargetTab(text) {
+  if (text.includes(COMPUTER_TARGET_TAB_MARKER)) return { text, changed: false };
+  const startAnchor = '  class ComputerTool extends BaseBrowserToolExecutor {';
+  const endAnchor = '  const computerTool = new ComputerTool();';
+  const start = text.indexOf(startAnchor);
+  if (start < 0) throw new Error('computer tool class anchor was not found');
+  const end = text.indexOf(endAnchor, start);
+  if (end < 0) throw new Error('computer tool end anchor was not found');
+  let block = text.slice(start, end);
+  const delegatePattern = /(yield (?:clickTool|fillTool|keyboardTool)\.execute\(\{)(\r?\n)(\s+)/gu;
+  let count = 0;
+  block = block.replace(delegatePattern, (_match, call, newline, indent) => {
+    count += 1;
+    return [
+      call,
+      newline,
+      indent + 'tabId: tab.id,',
+      newline,
+      indent + 'windowId: tab.windowId,',
+      newline,
+      indent,
+    ].join('');
+  });
+  const singleLineKeyboard = 'yield keyboardTool.execute({ keys: repeatedKeys });';
+  if (block.includes(singleLineKeyboard)) {
+    block = block.replace(
+      singleLineKeyboard,
+      'yield keyboardTool.execute({ tabId: tab.id, windowId: tab.windowId, keys: repeatedKeys });',
+    );
+    count += 1;
+  }
+  if (count !== 9) {
+    throw new Error('computer target-tab delegate count was ' + count + '; expected 9');
+  }
+  block = block.replace(
+    startAnchor,
+    startAnchor + '\n    // ' + COMPUTER_TARGET_TAB_MARKER,
+  );
+  return {
+    text: text.slice(0, start) + block + text.slice(end),
+    changed: true,
+  };
+}
+
+function patchComputerCoordinateClick(text) {
+  if (text.includes(COMPUTER_COORDINATE_CDP_MARKER)) return { text, changed: false };
+  const pattern = /            const coord = project\(params\.coordinates\);\r?\n            const domResult = yield clickTool\.execute\(\{\r?\n              tabId: tab\.id,\r?\n              windowId: tab\.windowId,\r?\n              coordinates: coord,\r?\n              waitForNavigation: false,\r?\n              timeout: TIMEOUTS\.DEFAULT_WAIT \* 5,\r?\n              button: params\.action === "right_click" \? "right" : "left",\r?\n              modifiers: params\.modifiers\r?\n            \}\);\r?\n            if \(!domResult\.isError\) \{\r?\n              return domResult;\r?\n            \}\r?\n            try \{/u;
+  const match = text.match(pattern);
+  if (!match) throw new Error('computer coordinate click anchor was not found');
+  const newline = match[0].includes('\r\n') ? '\r\n' : '\n';
+  const replacement = [
+    '            // ' + COMPUTER_COORDINATE_CDP_MARKER,
+    '            const coord = project(params.coordinates);',
+    '            try {',
+  ].join(newline);
+  return { text: text.replace(pattern, replacement), changed: true };
+}
+
 export function patchWebContentBackgroundText(text) {
   let next = text;
   let changed = false;
@@ -149,6 +209,12 @@ export function patchWebContentBackgroundText(text) {
     next = replaceExactlyOnce(next, URL_PATTERN_OLD, URL_PATTERN_NEW, 'safe URL patterns');
     changed = true;
   }
+  const computerTarget = patchComputerTargetTab(next);
+  next = computerTarget.text;
+  changed = changed || computerTarget.changed;
+  const coordinateClick = patchComputerCoordinateClick(next);
+  next = coordinateClick.text;
+  changed = changed || coordinateClick.changed;
   return { text: next, changed };
 }
 
