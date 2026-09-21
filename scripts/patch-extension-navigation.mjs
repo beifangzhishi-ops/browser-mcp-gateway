@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_BACKGROUND_MARKER = 'BMG_DEFAULT_BACKGROUND_V1';
-const NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V1';
+const LEGACY_NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V1';
+const NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V2';
 
 function lines(values) {
   return values.join('\n');
@@ -59,9 +60,10 @@ const NAVIGATION_HELPER = lines([
   '        reject(error);',
   '      };',
   '      const ready = (tab) => {',
-  '        if (!tab || tab.status !== "complete") return false;',
+  '        if (!tab) return false;',
   '        const current = tab.url || "";',
   '        if (current === expectedUrl) return true;',
+  '        if (tab.status !== "complete") return false;',
   '        return sawNavigation && current && current !== (previousUrl || "");',
   '      };',
   '      const check = () => {',
@@ -162,6 +164,36 @@ function patchDefaultBackground(text) {
 
 function patchNavigationSettle(text) {
   if (text.includes(NAVIGATION_SETTLE_MARKER)) return { text, changed: false };
+  if (text.includes(LEGACY_NAVIGATION_SETTLE_MARKER)) {
+    let upgraded = replaceExactlyOnce(
+      text,
+      lines([
+        '      const ready = (tab) => {',
+        '        if (!tab || tab.status !== "complete") return false;',
+        '        const current = tab.url || "";',
+        '        if (current === expectedUrl) return true;',
+        '        return sawNavigation && current && current !== (previousUrl || "");',
+        '      };',
+      ]),
+      lines([
+        '      const ready = (tab) => {',
+        '        if (!tab) return false;',
+        '        const current = tab.url || "";',
+        '        if (current === expectedUrl) return true;',
+        '        if (tab.status !== "complete") return false;',
+        '        return sawNavigation && current && current !== (previousUrl || "");',
+        '      };',
+      ]),
+      'legacy navigation ready predicate',
+    );
+    upgraded = replaceExactlyOnce(
+      upgraded,
+      '// ' + LEGACY_NAVIGATION_SETTLE_MARKER,
+      '// ' + NAVIGATION_SETTLE_MARKER,
+      'legacy navigation marker',
+    );
+    return { text: upgraded, changed: true };
+  }
   let next = replaceExactlyOnce(
     text,
     '  class NavigateTool extends BaseBrowserToolExecutor {',

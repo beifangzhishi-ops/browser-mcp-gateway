@@ -1787,7 +1787,8 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
 test('navigation patch keeps BMG browser work background-first and waits for settled URLs', () => {
   const background = readTextFile('extension/background.js');
   assert.match(background, /BMG_DEFAULT_BACKGROUND_V1/u);
-  assert.match(background, /BMG_NAVIGATION_SETTLE_V1/u);
+  assert.match(background, /BMG_NAVIGATION_SETTLE_V2/u);
+  assert.match(background, /if \(!tab\) return false;\s*const current = tab\.url \|\| "";\s*if \(current === expectedUrl\) return true;\s*if \(tab\.status !== "complete"\) return false;/u);
   assert.match(background, /background: background2 = true/u);
   assert.match(background, /const background2 = args\.background !== false;/u);
   assert.match(background, /bmgWaitForNavigation\(\s*explicitTab\.id, url, previousUrl/u);
