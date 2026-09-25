@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_BACKGROUND_MARKER = 'BMG_DEFAULT_BACKGROUND_V1';
 const LEGACY_NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V1';
 const NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V2';
+const NAVIGATION_TARGET_MARKER = 'BMG_EXPLICIT_TARGET_NAVIGATION_V1';
+const SAFE_URL_PATTERN_MARKER = 'BMG_SAFE_NAVIGATION_URL_PATTERNS_V1';
 
 function lines(values) {
   return values.join('\n');
@@ -100,6 +102,113 @@ const NAVIGATION_HELPER = lines([
   '  }',
   '',
 ]);
+
+export function patchNavigationTargetSelection(text) {
+  const hasTargetMarker = text.includes(NAVIGATION_TARGET_MARKER);
+  const hasPatternMarker = text.includes(SAFE_URL_PATTERN_MARKER);
+  if (hasTargetMarker || hasPatternMarker) {
+    if (hasTargetMarker && hasPatternMarker) return { text, changed: false };
+    throw new Error('navigation target patch markers are inconsistent');
+  }
+
+  let next = text;
+  next = replaceExactlyOnce(
+    next,
+    lines([
+      '          console.log(`Checking if URL is already open: ${url}`);',
+      '          const buildUrlPatterns = (input) => {',
+    ]),
+    lines([
+      '          // ' + NAVIGATION_TARGET_MARKER,
+      '          const explicitTab = yield this.tryGetTab(tabId);',
+      '          console.log(`Checking if URL is already open: ${url}`);',
+      '          const buildUrlPatterns = (input) => {',
+    ]),
+    'explicit navigation target',
+  );
+
+  next = replaceExactlyOnce(
+    next,
+    lines([
+      '                const hostNoWww = u.host.replace(/^www\\./, "");',
+      '                const hostWithWww = hostNoWww.startsWith("www.") ? hostNoWww : `www.${hostNoWww}`;',
+      '                patterns2.add(`${u.protocol}//${u.host}${pathWildcard}`);',
+      '                patterns2.add(`${u.protocol}//${hostNoWww}${pathWildcard}`);',
+      '                patterns2.add(`${u.protocol}//${hostWithWww}${pathWildcard}`);',
+      '                const altProtocol = u.protocol === "https:" ? "http:" : "https:";',
+      '                patterns2.add(`${altProtocol}//${u.host}${pathWildcard}`);',
+      '                patterns2.add(`${altProtocol}//${hostNoWww}${pathWildcard}`);',
+      '                patterns2.add(`${altProtocol}//${hostWithWww}${pathWildcard}`);',
+    ]),
+    lines([
+      '                // ' + SAFE_URL_PATTERN_MARKER,
+      '                if (u.protocol !== "http:" && u.protocol !== "https:") return [];',
+      '                const hostNoWww = u.host.replace(/^www\\./, "");',
+      '                const hostnameNoWww = u.hostname.replace(/^www\\./, "");',
+      '                const isIpLiteral = /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(hostnameNoWww) || hostnameNoWww.includes(":");',
+      '                const hostWithWww =',
+      '                  hostnameNoWww !== "localhost" && !isIpLiteral ? `www.${hostNoWww}` : null;',
+      '                patterns2.add(`${u.protocol}//${u.host}${pathWildcard}`);',
+      '                patterns2.add(`${u.protocol}//${hostNoWww}${pathWildcard}`);',
+      '                if (hostWithWww) patterns2.add(`${u.protocol}//${hostWithWww}${pathWildcard}`);',
+      '                const altProtocol = u.protocol === "https:" ? "http:" : "https:";',
+      '                patterns2.add(`${altProtocol}//${u.host}${pathWildcard}`);',
+      '                patterns2.add(`${altProtocol}//${hostNoWww}${pathWildcard}`);',
+      '                if (hostWithWww) patterns2.add(`${altProtocol}//${hostWithWww}${pathWildcard}`);',
+    ]),
+    'safe navigation URL patterns',
+  );
+
+  next = replaceExactlyOnce(
+    next,
+    lines([
+      '              } else {',
+      '                patterns2.add(input);',
+      '              }',
+      '            } catch (e) {',
+      '              patterns2.add(input.endsWith("/") ? `${input}*` : `${input}/*`);',
+      '            }',
+      '            return Array.from(patterns2);',
+    ]),
+    lines([
+      '              } else if (/^https?:\\/\\//i.test(input)) {',
+      '                patterns2.add(input);',
+      '              }',
+      '            } catch (e) {',
+      '              return [];',
+      '            }',
+      '            return Array.from(patterns2);',
+    ]),
+    'non-http navigation URL patterns',
+  );
+
+  next = replaceExactlyOnce(
+    next,
+    lines([
+      '          const urlPatterns = buildUrlPatterns(url);',
+      '          const candidateTabs = yield chrome.tabs.query({ url: urlPatterns });',
+    ]),
+    lines([
+      '          const urlPatterns = explicitTab ? [] : buildUrlPatterns(url);',
+      '          const candidateTabs = urlPatterns.length > 0',
+      '            ? yield chrome.tabs.query({ url: urlPatterns })',
+      '            : [];',
+    ]),
+    'conditional navigation URL query',
+  );
+
+  next = replaceExactlyOnce(
+    next,
+    lines([
+      '          const explicitTab = yield this.tryGetTab(tabId);',
+      '          const existingTab = explicitTab || pickBestMatch(url, candidateTabs);',
+    ]),
+    '          const existingTab = explicitTab || pickBestMatch(url, candidateTabs);',
+    'late explicit navigation target',
+  );
+
+  return { text: next, changed: true };
+}
 
 function patchDefaultBackground(text) {
   if (text.includes(DEFAULT_BACKGROUND_MARKER)) return { text, changed: false };
@@ -358,10 +467,11 @@ function patchNavigationSettle(text) {
 
 export function patchNavigationBackgroundText(text) {
   const background = patchDefaultBackground(text);
-  const navigation = patchNavigationSettle(background.text);
+  const target = patchNavigationTargetSelection(background.text);
+  const navigation = patchNavigationSettle(target.text);
   return {
     text: navigation.text,
-    changed: background.changed || navigation.changed,
+    changed: background.changed || target.changed || navigation.changed,
   };
 }
 

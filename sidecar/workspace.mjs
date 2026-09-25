@@ -231,7 +231,8 @@ export class BrowserWorkspaceRouter {
     try {
       await cleanup;
     } catch (error) {
-      this.logger?.error?.('BMG workspace idle cleanup failed; it will retry after the timeout.');
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger?.error?.(`BMG workspace idle cleanup failed: ${detail}; it will retry after the timeout.`);
       this.lastActivityAt = this.clock();
       this.scheduleIdleCleanup();
     } finally {
@@ -249,7 +250,13 @@ export class BrowserWorkspaceRouter {
     if (!this.windowId) return;
 
     const targetWindowId = this.windowId;
-    const message = await this.callTool('get_windows_and_tabs', {});
+    let message;
+    try {
+      message = await this.callTool('get_windows_and_tabs', {});
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`enumerate-windows: ${detail}`);
+    }
     if (generation !== this.activityGeneration) return;
     const data = parseToolData(message);
     const windows = Array.isArray(data?.windows) ? data.windows : [];
@@ -268,27 +275,43 @@ export class BrowserWorkspaceRouter {
       ? this.tabId
       : asPositiveInteger(tabs.find((tab) => tab?.active)?.tabId) || tabIds[0];
     if (generation !== this.activityGeneration) return;
-    const blankMessage = await this.callTool('chrome_navigate', {
-      url: 'about:blank',
-      tabId: keepTabId,
-      windowId: targetWindowId,
-      newWindow: false,
-      background: true,
-    });
+    let blankMessage;
+    try {
+      blankMessage = await this.callTool('chrome_javascript', {
+        code: 'location.replace("about:blank"); return "scheduled";',
+        tabId: keepTabId,
+        timeoutMs: 5000,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`reset-to-blank: ${detail}`);
+    }
     if (toolResultIsError(blankMessage)) {
-      throw new Error('BMG workspace tab could not be reset to about:blank.');
+      throw new Error('reset-to-blank: upstream tool returned an error.');
     }
     if (generation !== this.activityGeneration) return;
     const extraTabIds = tabIds.filter((tabId) => tabId !== keepTabId);
     if (extraTabIds.length > 0) {
-      const closeMessage = await this.callTool('chrome_close_tabs', { tabIds: extraTabIds });
+      let closeMessage;
+      try {
+        closeMessage = await this.callTool('chrome_close_tabs', { tabIds: extraTabIds });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`close-extra-tabs: ${detail}`);
+      }
       const closeData = parseToolData(closeMessage);
       if (toolResultIsError(closeMessage) || closeData?.success === false) {
-        throw new Error('BMG workspace extra tabs could not be closed.');
+        throw new Error('close-extra-tabs: upstream tool returned an error.');
       }
     }
     if (this.hwnd && this.windowMarker) {
-      const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+      let hidden;
+      try {
+        hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`rehide-workspace: ${detail}`);
+      }
       this.updateWindowIdentity(hidden);
     }
     this.lastActivityAt = this.clock();

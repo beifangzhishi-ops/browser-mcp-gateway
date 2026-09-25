@@ -17,6 +17,7 @@ import {
 } from '../scripts/patch-extension-web-content.mjs';
 import {
   patchNavigationBackgroundText,
+  patchNavigationTargetSelection,
 } from '../scripts/patch-extension-navigation.mjs';
 import {
   patchContentCdpBackgroundText,
@@ -1032,11 +1033,8 @@ suffix`;
   assert.match(first.text, /BMG_WEB_CONTENT_FALLBACK_V1/u);
   assert.match(first.text, /BMG_INTERACTIVE_WORKSPACE_TARGET_V1/u);
   assert.match(first.text, /BMG_NATURAL_NEW_WINDOW_GEOMETRY_V1/u);
-  assert.match(first.text, /BMG_SAFE_URL_PATTERN_HOSTS_V1/u);
   assert.match(first.text, /BMG_COMPUTER_TARGET_TAB_V1/u);
   assert.match(first.text, /BMG_COMPUTER_COORDINATE_CDP_V1/u);
-  assert.match(first.text, /hostnameNoWww !== "localhost" && !isIpLiteral/u);
-  assert.match(first.text, /if \(hostWithWww\) patterns2\.add/u);
   assert.match(first.text, /chrome\.windows\.create\(createWindowOptions\)/u);
   assert.doesNotMatch(first.text, /width: typeof width === "number" \? width : DEFAULT_WINDOW_WIDTH/u);
   assert.match(first.text, /webContentMessageWithFallback/u);
@@ -1273,6 +1271,7 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
   let workspaceSequence = 0;
   const closeCalls = [];
   const navigateCalls = [];
+  const javascriptCalls = [];
   const hiddenHwnds = [];
   const setTimer = (fn, delay) => {
     const timer = { fn, delay, cancelled: false, unref() {} };
@@ -1303,6 +1302,10 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
       if (name === 'chrome_navigate') {
         navigateCalls.push({ ...args });
         return workspaceToolMessage({ success: true, windowId: 7001, tabId: 7002 });
+      }
+      if (name === 'chrome_javascript') {
+        javascriptCalls.push({ ...args });
+        return workspaceToolMessage({ success: true, tabId: 7002, engine: 'cdp', result: 'scheduled' });
       }
       if (name === 'get_windows_and_tabs') {
         return workspaceToolMessage({
@@ -1344,12 +1347,11 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
 
   now = 1900;
   await refreshedTimer.fn();
-  assert.deepEqual(navigateCalls, [{
-    url: 'about:blank',
+  assert.deepEqual(navigateCalls, []);
+  assert.deepEqual(javascriptCalls, [{
+    code: 'location.replace("about:blank"); return "scheduled";',
     tabId: 7002,
-    windowId: 7001,
-    newWindow: false,
-    background: true,
+    timeoutMs: 5000,
   }]);
   assert.deepEqual(closeCalls, [[7004, 7005]]);
   assert.equal(closeCalls[0].includes(9902), false);
@@ -1366,6 +1368,43 @@ test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
   });
   assert.equal(fresh.params.arguments.windowId, 7001);
   assert.equal(fresh.params.arguments.tabId, 7002);
+});
+
+test('workspace idle cleanup logs the failing stage and reschedules', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-idle-log-test-'));
+  let now = 0;
+  let scheduledTimer = null;
+  const errors = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    idleTimeoutMs: 1000,
+    clock: () => now,
+    setTimer: (fn, delay) => {
+      scheduledTimer = { fn, delay, unref() {} };
+      return scheduledTimer;
+    },
+    clearTimer: () => {},
+    stateFile: path.join(rootDir, 'workspace.json'),
+    logger: { error(message) { errors.push(message); }, log() {} },
+    callTool: async (name) => {
+      if (name === 'get_windows_and_tabs') throw new Error('synthetic upstream outage');
+      throw new Error('unexpected tool');
+    },
+  });
+  t.after(async () => {
+    await router.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+  router.windowId = 8001;
+  router.tabId = 8002;
+  router.lastActivityAt = 0;
+  router.scheduleIdleCleanup();
+  now = 1000;
+  await scheduledTimer.fn();
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /enumerate-windows: synthetic upstream outage/u);
+  assert.match(errors[0], /retry after the timeout/u);
+  assert.equal(scheduledTimer.delay, 1000);
 });
 
 test('workspace router creates one background window and pins page tools to it', async (t) => {
@@ -1784,10 +1823,60 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
 });
 
 
+test('navigation target patch prioritizes explicit tabs and rejects non-http match patterns', () => {
+  const fixture = `prefix
+          console.log(\`Checking if URL is already open: \${url}\`);
+          const buildUrlPatterns = (input) => {
+            const patterns2 = /* @__PURE__ */ new Set();
+            try {
+              if (!input.includes("*")) {
+                const u = new URL(input);
+                const pathWildcard = "/*";
+                const hostNoWww = u.host.replace(/^www\\./, "");
+                const hostWithWww = hostNoWww.startsWith("www.") ? hostNoWww : \`www.\${hostNoWww}\`;
+                patterns2.add(\`\${u.protocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${u.protocol}//\${hostWithWww}\${pathWildcard}\`);
+                const altProtocol = u.protocol === "https:" ? "http:" : "https:";
+                patterns2.add(\`\${altProtocol}//\${u.host}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostNoWww}\${pathWildcard}\`);
+                patterns2.add(\`\${altProtocol}//\${hostWithWww}\${pathWildcard}\`);
+              } else {
+                patterns2.add(input);
+              }
+            } catch (e) {
+              patterns2.add(input.endsWith("/") ? \`\${input}*\` : \`\${input}/*\`);
+            }
+            return Array.from(patterns2);
+          };
+          const urlPatterns = buildUrlPatterns(url);
+          const candidateTabs = yield chrome.tabs.query({ url: urlPatterns });
+          console.log(\`Found \${candidateTabs.length} matching tabs with patterns:\`, urlPatterns);
+          const explicitTab = yield this.tryGetTab(tabId);
+          const existingTab = explicitTab || pickBestMatch(url, candidateTabs);
+suffix`;
+  const first = patchNavigationTargetSelection(fixture);
+  assert.equal(first.changed, true);
+  assert.match(first.text, /BMG_EXPLICIT_TARGET_NAVIGATION_V1/u);
+  assert.match(first.text, /BMG_SAFE_NAVIGATION_URL_PATTERNS_V1/u);
+  assert.match(first.text, /const explicitTab = yield this\.tryGetTab\(tabId\);[\s\S]*const urlPatterns = explicitTab \? \[\] : buildUrlPatterns\(url\);/u);
+  assert.match(first.text, /u\.protocol !== "http:" && u\.protocol !== "https:"\) return \[\]/u);
+  assert.match(first.text, /urlPatterns\.length > 0[\s\S]*chrome\.tabs\.query/u);
+  assert.match(first.text, /hostnameNoWww !== "localhost" && !isIpLiteral/u);
+  assert.match(first.text, /if \(hostWithWww\) patterns2\.add/u);
+  assert.doesNotMatch(first.text, /patterns2\.add\(input\.endsWith/u);
+  const second = patchNavigationTargetSelection(first.text);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, first.text);
+});
+
 test('navigation patch keeps BMG browser work background-first and waits for settled URLs', () => {
   const background = readTextFile('extension/background.js');
   assert.match(background, /BMG_DEFAULT_BACKGROUND_V1/u);
   assert.match(background, /BMG_NAVIGATION_SETTLE_V2/u);
+  assert.match(background, /BMG_EXPLICIT_TARGET_NAVIGATION_V1/u);
+  assert.match(background, /BMG_SAFE_NAVIGATION_URL_PATTERNS_V1/u);
+  assert.doesNotMatch(background, /BMG_SAFE_URL_PATTERN_HOSTS_V1/u);
   assert.match(background, /if \(!tab\) return false;\s*const current = tab\.url \|\| "";\s*if \(current === expectedUrl\) return true;\s*if \(tab\.status !== "complete"\) return false;/u);
   assert.match(background, /background: background2 = true/u);
   assert.match(background, /const background2 = args\.background !== false;/u);
