@@ -90,7 +90,7 @@ node scripts\test-bmg-e2e.mjs
 
 该检查连续运行两轮 OAuth/PKCE，并验证两轮共享同一个 upstream MCP session。每轮的下游 DELETE 只关闭客户端视角的 session，不会关闭共享 upstream transport；sidecar 停止时关闭自身监听并保留该 session 的非敏感元数据，重启后继续复用。这样兼容 upstream 的 singleton transport 生命周期。
 
-workspace 模式会补充暴露 pinned bridge mcp-chrome-bridge@1.0.29 的静态 tools/list 漏掉、但当前 upstream extension 已实现的 chrome_computer、chrome_upload_file 和 chrome_handle_download。chrome_computer 的 type action 使用 CDP Input.insertText，可向 contenteditable / ProseMirror 输入任意文本；BMG 仍会将该工具固定到 ownership-verified workspace tab。上传应优先使用 chrome_upload_file 直接通过 CDP DOM.setFileInputFiles 设置 <input type=file>，避免弹出 Windows 文件选择器；chrome_handle_download 用于等待浏览器管理的下载并返回最终本机文件路径、状态和大小。Windows 原生 File System Access / Save As 对话框不在这些工具的控制范围内，必要时使用 bmg_show_workspace 人工处理。
+workspace 模式使用 `mcp-chrome-bridge@1.0.31` / `chrome-mcp-shared@1.0.2` 的当前完整公开工具目录，并保留 bridge 动态发现的 `flow.<slug>` 录制流程工具。BMG 不再维护上游工具 schema 副本；sidecar 只追加 `bmg_show_workspace` / `bmg_hide_workspace`，并把所有页面型工具强制路由到 ownership-verified workspace tab/window。上游仍依赖 active/currentWindow 的工具通过 `scripts/patch-extension-upstream-tools.mjs` 获得显式 target；动态 flow 在执行期把查询、建标签、切换标签和关闭标签都限制在同一 BMG workspace window。`chrome_upload_file` 的 `filePath`、`fileUrl`、`base64Data` 三种模式由 1.0.31 native `file_operation` 支持。Windows 原生 File System Access / Save As 对话框仍不在这些工具的控制范围内，必要时使用 `bmg_show_workspace` 人工处理。
 
 configure-funnel.ps1 和 disable-funnel.ps1 默认只输出预览；本阶段不实际修改 Tailscale Funnel。未来若明确需要应用，才显式使用 -Apply，脚本也只处理 BMG 自己的精确 OAuth/MCP 路径。
 
@@ -123,20 +123,21 @@ sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周�
 ## Upstream versions currently pinned
 
 - Source: `hangwin/mcp-chrome` commit `f48e71751e00bc09725c7e173423cff4f2ccd12a`
-- Native bridge: `mcp-chrome-bridge@1.0.29`
+- Native bridge: `mcp-chrome-bridge@1.0.31`
+- Shared tool catalog: `chrome-mcp-shared@1.0.2`
 - Extension release: `v1.0.0`
 - Extension archive SHA256: `e0f7edfe84b64fd452deec048fc202cfa33585943da63a06c08e2bbc97770f6a`
 
 The source checkout is kept under ignored `upstream/mcp-chrome/` for inspection only. Runtime uses the upstream npm bridge package and release extension rather than a locally modified fork.
 
-The pinned bridge remains on 1.0.29 deliberately. Newer mcp-chrome-bridge@1.0.31 publishes chrome_computer through chrome-mcp-shared@1.0.2, but it also changes the public tool catalog and tool-result shape. BMG therefore exposes the missing upstream tools it needs without replacing the currently validated bridge runtime.
+The pinned bridge tracks the current upstream npm release used by this repository. BMG exposes the full `chrome-mcp-shared@1.0.2` public catalog plus dynamic `flow.<slug>` tools from the bridge. Workspace safety is enforced below the schema layer, so BMG can follow upstream tool additions without duplicating their public definitions.
 
 ## Requirements
 
 - Windows 10/11
 - Microsoft Edge
 - Git
-- Node.js 20+
+- Node.js 20+; Node.js 22 is the preferred fallback for `mcp-chrome-bridge@1.0.31` if Node.js 24 cannot compile its `better-sqlite3` dependency locally.
 - npm
 - Tailscale with Funnel enabled for this device/tailnet
 
@@ -171,7 +172,7 @@ or double-click:
 Setup will:
 
 1. Verify GitHub CLI authentication and resolve the configured npm proxy.
-2. Install `mcp-chrome-bridge@1.0.29` globally with npm.
+2. Install `mcp-chrome-bridge@1.0.31` globally with npm.
 3. Register the installed Native Messaging host directly for Microsoft Edge.
 4. Download and SHA256-verify the pinned upstream extension release into `extension/`.
 
@@ -179,7 +180,7 @@ It does not register or configure Google Chrome.
 
 ## Windows 命令说明
 
-仓库脚本在 Windows 上显式调用 `gh.exe`、`node.exe`、`npm.cmd` 和 `mcp-chrome-bridge.cmd`，避免 PowerShell 执行策略拦截 npm 生成的 `.ps1` shim；当 PATH 中存在多个同名程序时取第一个匹配项，`状态.cmd` 会直接显示这些程序的版本。当前仓库固定的 `mcp-chrome-bridge@1.0.29` 提供 `register`、`fix-permissions` 和 `update-port`，不包含 `doctor` 子命令；排查时不要直接运行 `mcp-chrome-bridge.ps1`。新版桥接包可能引入需要本机编译的原生依赖，升级前应先确认 Node.js 版本兼容性。
+仓库脚本在 Windows 上显式调用 `gh.exe`、`node.exe`、`npm.cmd` 和 `mcp-chrome-bridge.cmd`，避免 PowerShell 执行策略拦截 npm 生成的 `.ps1` shim；当 PATH 中存在多个同名程序时取第一个匹配项，`状态.cmd` 会直接显示这些程序的版本。当前仓库固定 `mcp-chrome-bridge@1.0.31`，Node.js 要求为 20+；该版本同时提供 `doctor` / `report`、native `file_operation` 和动态 flow 工具发现。排查时不要直接运行 `mcp-chrome-bridge.ps1`。
 
 ### Proxy handling
 
@@ -274,7 +275,13 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` 控制自动清理，默认 `1800` 秒。浏览器工具活动会刷新期限；到期后 BMG 重新验证 ownership，通过内部 `chrome_javascript`/CDP 在明确的保留 `tabId` 上执行 `location.replace("about:blank")`，然后只关闭同一受控窗口中的额外标签页，并保留一个真正隐藏的空白标签页。这里不再经过 `chrome_navigate` 的 URL-pattern 预检查，因此即使当前 Edge 尚未重新加载最新 extension patch，空闲清理也不受 `about:///*` 缺陷影响。设置为 `0` 可禁用空闲清理。读历史、书签、窗口列表等全局工具仍不是 window-scoped。
 
-自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、空闲清理阶段化错误日志、默认后台与显式前台语义、人工显示后恢复隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 37/37 通过。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，本机配置已恢复为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=1800`。
+自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、空闲清理阶段化错误日志、默认后台与显式前台语义、人工显示后恢复隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 39/39 通过。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，本机配置已恢复为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=1800`。
+
+### Upstream parity validation (2026-10-01)
+
+The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 39/39.
+
+The current CCM sandbox cannot complete the machine-wide npm upgrade because it cannot write the user's global npm directory or run npm lifecycle child processes. Before live BMG E2E validation, run the repository setup script locally outside CCM so the installed bridge, Native Messaging registration, and Edge extension all use the new runtime.
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 

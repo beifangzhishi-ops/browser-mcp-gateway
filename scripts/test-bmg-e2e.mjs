@@ -173,15 +173,55 @@ async function runRound(round, approvalSecret) {
   requireStatus(tools, 200);
   const toolList = parseSse(tools.text).result.tools;
   if (config.workspaceMode) {
-    for (const name of [
+    const expectedTools = [
       'bmg_show_workspace',
       'bmg_hide_workspace',
+      'get_windows_and_tabs',
+      'performance_start_trace',
+      'performance_stop_trace',
+      'performance_analyze_insight',
+      'chrome_read_page',
       'chrome_computer',
-      'chrome_upload_file',
+      'chrome_navigate',
+      'chrome_screenshot',
+      'chrome_close_tabs',
+      'chrome_switch_tab',
+      'chrome_get_web_content',
+      'chrome_network_request',
+      'chrome_network_capture',
       'chrome_handle_download',
-    ]) {
+      'chrome_history',
+      'chrome_bookmark_search',
+      'chrome_bookmark_add',
+      'chrome_bookmark_delete',
+      'chrome_javascript',
+      'chrome_click_element',
+      'chrome_fill_or_select',
+      'chrome_request_element_selection',
+      'chrome_keyboard',
+      'chrome_console',
+      'chrome_upload_file',
+      'chrome_handle_dialog',
+      'chrome_gif_recorder',
+    ];
+    for (const name of expectedTools) {
       if (!toolList.some((tool) => tool.name === name)) {
-        throw new Error('Workspace control tool was not listed: ' + name);
+        throw new Error('Expected upstream/BMG tool was not listed: ' + name);
+      }
+    }
+    for (const name of [
+      'chrome_go_back_or_forward',
+      'chrome_get_interactive_elements',
+      'chrome_network_debugger_start',
+      'chrome_network_debugger_stop',
+      'chrome_network_capture_start',
+      'chrome_network_capture_stop',
+      'search_tabs_content',
+      'chrome_inject_script',
+      'chrome_send_command_to_inject_script',
+    ]) {
+      if (toolList.some((tool) => tool.name === name)) {
+        throw new Error('Legacy upstream tool must not remain public: ' + name);
       }
     }
   }

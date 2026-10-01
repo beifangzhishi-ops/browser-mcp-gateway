@@ -13,7 +13,7 @@ $extensionZip = Join-Path $cacheDir "chrome-mcp-server-1.0.0.zip"
 
 $upstreamRepo = "hangwin/mcp-chrome"
 $upstreamCommit = "f48e71751e00bc09725c7e173423cff4f2ccd12a"
-$bridgeVersion = "1.0.29"
+$bridgeVersion = "1.0.31"
 $extensionTag = "v1.0.0"
 $extensionAsset = "chrome-mcp-server-1.0.0.zip"
 $extensionSha256 = "e0f7edfe84b64fd452deec048fc202cfa33585943da63a06c08e2bbc97770f6a"
@@ -90,6 +90,9 @@ if ($nodeVersion.Major -lt 20) {
     throw "Node.js 20+ is required. Current version: $nodeVersionText"
 }
 Write-Output "Node.js: $nodeVersionText"
+if ($nodeVersion.Major -ge 24) {
+    Write-Warning "mcp-chrome-bridge@1.0.31 resolves better-sqlite3 11.x, which may compile from source on Node.js 24. If npm install fails on native build prerequisites, use Node.js 22 for this pinned bridge or install the required C++ build toolchain."
+}
 
 Write-Output "Checking GitHub CLI authentication..."
 & $gh.Source auth status
@@ -171,6 +174,7 @@ Write-Output "Applying BMG browser stability patches..."
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-web-content.mjs") $extensionDir
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-content-cdp.mjs") $extensionDir
 & $node.Source (Join-Path $PSScriptRoot "patch-extension-navigation.mjs") $extensionDir
+& $node.Source (Join-Path $PSScriptRoot "patch-extension-upstream-tools.mjs") $extensionDir
 if ($LASTEXITCODE -ne 0) {
     throw "BMG browser extension stability patch failed."
 }

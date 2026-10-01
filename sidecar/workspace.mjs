@@ -7,32 +7,49 @@ const STARTUP_STATE_VERSION = 1;
 const STARTUP_STATE_CLAIM_GRACE_MS = 30 * 1000;
 const STARTUP_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 const TARGET_TOOLS = new Set([
+  'performance_start_trace',
+  'performance_stop_trace',
+  'performance_analyze_insight',
+  'chrome_read_page',
+  'chrome_computer',
   'chrome_navigate',
   'chrome_screenshot',
-  'chrome_go_back_or_forward',
+  'chrome_switch_tab',
   'chrome_get_web_content',
-  'chrome_read_page',
+  'chrome_network_request',
+  'chrome_network_capture',
+  'chrome_javascript',
   'chrome_click_element',
-  'chrome_computer',
   'chrome_fill_or_select',
-  'chrome_get_interactive_elements',
+  'chrome_request_element_selection',
   'chrome_keyboard',
-  'chrome_network_debugger_start',
-  'chrome_network_capture_start',
-  'chrome_inject_script',
-  'chrome_send_command_to_inject_script',
   'chrome_console',
   'chrome_upload_file',
+  'chrome_handle_dialog',
+  'chrome_gif_recorder',
+  'chrome_bookmark_add',
 ]);
 const BACKGROUND_TOOLS = new Set([
+  'performance_start_trace',
+  'performance_stop_trace',
+  'performance_analyze_insight',
+  'chrome_read_page',
+  'chrome_javascript',
+  'chrome_network_request',
+  'chrome_network_capture',
+  'chrome_switch_tab',
   'chrome_navigate',
   'chrome_screenshot',
   'chrome_get_web_content',
   'chrome_computer',
-  'chrome_network_debugger_start',
-  'chrome_inject_script',
   'chrome_console',
+  'chrome_upload_file',
+  'chrome_handle_dialog',
+  'chrome_gif_recorder',
+  'chrome_bookmark_add',
 ]);
+const FOREGROUND_TOOLS = new Set(['chrome_request_element_selection']);
+const FLOW_TOOL_PREFIX = 'flow.';
 
 function asPositiveInteger(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
@@ -587,7 +604,11 @@ export class BrowserWorkspaceRouter {
     const name = payload.params?.name;
     if (typeof name !== 'string') return payload;
     this.markActivity();
-    if (name === 'get_windows_and_tabs' || !TARGET_TOOLS.has(name) && name !== 'chrome_close_tabs') {
+    const isFlowTool = name.startsWith(FLOW_TOOL_PREFIX);
+    if (
+      name === 'get_windows_and_tabs' ||
+      !isFlowTool && !TARGET_TOOLS.has(name) && name !== 'chrome_close_tabs'
+    ) {
       return payload;
     }
     const workspace = await this.ensureWorkspace();
@@ -595,6 +616,9 @@ export class BrowserWorkspaceRouter {
     if (name === 'chrome_close_tabs') {
       delete args.url;
       args.tabIds = [workspace.tabId];
+    } else if (isFlowTool) {
+      args.__bmg_workspace_tab_id = workspace.tabId;
+      args.__bmg_workspace_window_id = workspace.windowId;
     } else {
       args.tabId = workspace.tabId;
       args.windowId = workspace.windowId;
@@ -611,6 +635,10 @@ export class BrowserWorkspaceRouter {
       const backgroundRequested =
         isBackgroundTool && args.background !== false;
       if (foregroundRequested && this.hwnd && this.windowMarker) {
+        const shown = await this.showWindow(this.hwnd, this.windowMarker);
+        this.updateWindowIdentity(shown);
+        this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
+      } else if (FOREGROUND_TOOLS.has(name) && this.hwnd && this.windowMarker) {
         const shown = await this.showWindow(this.hwnd, this.windowMarker);
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
@@ -634,8 +662,23 @@ export class BrowserWorkspaceRouter {
   async observe(payload, message) {
     if (!this.enabled || payload?.method !== 'tools/call') return;
     const name = payload.params?.name;
+    const isFlowTool = typeof name === 'string' && name.startsWith(FLOW_TOOL_PREFIX);
     if (toolResultIsError(message)) {
       this.validated = false;
+      if (
+        (TARGET_TOOLS.has(name) || isFlowTool) &&
+        this.visible &&
+        this.hwnd &&
+        this.windowMarker
+      ) {
+        try {
+          const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+          this.updateWindowIdentity(hidden);
+          this.remember(this.windowId, this.tabId, this.hwnd, false);
+        } catch {
+          this.logger?.error?.('BMG workspace HWND maintenance failed after tool error.');
+        }
+      }
       return;
     }
     if (name === 'chrome_navigate') {
@@ -651,7 +694,11 @@ export class BrowserWorkspaceRouter {
       if (data?.success === true) this.reset();
       return;
     }
-    if (TARGET_TOOLS.has(name) && this.hwnd && this.windowMarker) {
+    if (
+      (TARGET_TOOLS.has(name) || isFlowTool) &&
+      this.hwnd &&
+      this.windowMarker
+    ) {
       const keepVisible =
         BACKGROUND_TOOLS.has(name) &&
         payload.params?.arguments?.background === false;
@@ -663,6 +710,7 @@ export class BrowserWorkspaceRouter {
         const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
         this.updateWindowIdentity(hidden);
         this.remember(this.windowId, this.tabId, this.hwnd, false);
+        if (isFlowTool) this.validated = false;
       } catch {
         this.validated = false;
         this.logger?.error?.('BMG workspace HWND maintenance failed; browser result remains valid.');

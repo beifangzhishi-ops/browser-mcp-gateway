@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHash, randomBytes } from 'node:crypto';
-import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, workspaceSupplementalToolsForTest } from '../sidecar/server.mjs';
+import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest } from '../sidecar/server.mjs';
 import { createConfig } from '../sidecar/config.mjs';
 import { BrowserWorkspaceRouter } from '../sidecar/workspace.mjs';
 import { prepareWorkspace } from '../scripts/ensure-workspace.mjs';
@@ -22,6 +22,10 @@ import {
 import {
   patchContentCdpBackgroundText,
 } from '../scripts/patch-extension-content-cdp.mjs';
+import {
+  patchFlowWorkspace,
+  patchUpstreamToolsBackgroundText,
+} from '../scripts/patch-extension-upstream-tools.mjs';
 import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
@@ -203,16 +207,37 @@ function readTextFile(relativePath) {
 }
 
 function requestJson(baseUrl, requestPath, options = {}) {
-  return fetch(baseUrl + requestPath, {
-    redirect: 'manual',
-    ...options,
-  }).then(async (response) => {
-    const text = await response.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {}
-    return { response, text, json };
+  return new Promise((resolve, reject) => {
+    const target = new URL(requestPath, baseUrl);
+    const request = http.request(target, {
+      method: options.method || 'GET',
+      headers: options.headers || {},
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on('data', (chunk) => chunks.push(chunk));
+      incoming.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {}
+        const response = {
+          status: incoming.statusCode || 0,
+          headers: {
+            get(name) {
+              const value = incoming.headers[String(name).toLowerCase()];
+              if (Array.isArray(value)) return value.join(', ');
+              return value ?? null;
+            },
+          },
+        };
+        resolve({ response, text, json });
+      });
+      incoming.on('error', reject);
+    });
+    request.on('error', reject);
+    if (options.body !== undefined && options.body !== null) request.write(options.body);
+    request.end();
   });
 }
 
@@ -1050,6 +1075,8 @@ suffix`;
 
   const setup = readTextFile('scripts/setup.ps1');
   assert.match(setup, /patch-extension-web-content\.mjs/u);
+  assert.match(setup, /\$bridgeVersion = "1\.0\.31"/u);
+  assert.match(setup, /patch-extension-upstream-tools\.mjs/u);
 });
 
 test('content CDP fallback patch is deterministic and wired into setup', () => {
@@ -1500,7 +1527,7 @@ test('workspace router creates one background window and pins page tools to it',
   });
   assert.equal(rewrittenReadPage.params.arguments.windowId, 7001);
   assert.equal(rewrittenReadPage.params.arguments.tabId, 7002);
-  assert.equal('background' in rewrittenReadPage.params.arguments, false);
+  assert.equal(rewrittenReadPage.params.arguments.background, true);
 
   const rewrittenComputer = await router.rewrite({
     jsonrpc: '2.0',
@@ -1511,6 +1538,39 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(rewrittenComputer.params.arguments.windowId, 7001);
   assert.equal(rewrittenComputer.params.arguments.tabId, 7002);
   assert.equal(rewrittenComputer.params.arguments.background, true);
+
+  for (const name of [
+    'performance_start_trace',
+    'performance_stop_trace',
+    'performance_analyze_insight',
+    'chrome_network_request',
+    'chrome_network_capture',
+    'chrome_javascript',
+    'chrome_switch_tab',
+    'chrome_handle_dialog',
+    'chrome_gif_recorder',
+    'chrome_bookmark_add',
+  ]) {
+    const rewritten = await router.rewrite({
+      jsonrpc: '2.0',
+      id: 'all-tools-' + name,
+      method: 'tools/call',
+      params: { name, arguments: name === 'chrome_switch_tab' ? { tabId: 9999 } : {} },
+    });
+    assert.equal(rewritten.params.arguments.windowId, 7001, name);
+    assert.equal(rewritten.params.arguments.tabId, 7002, name);
+  }
+
+  const rewrittenFlow = await router.rewrite({
+    jsonrpc: '2.0',
+    id: 24,
+    method: 'tools/call',
+    params: { name: 'flow.login-check', arguments: { username: 'demo', tabTarget: 'new' } },
+  });
+  assert.equal(rewrittenFlow.params.arguments.username, 'demo');
+  assert.equal(rewrittenFlow.params.arguments.tabTarget, 'new');
+  assert.equal(rewrittenFlow.params.arguments.__bmg_workspace_window_id, 7001);
+  assert.equal(rewrittenFlow.params.arguments.__bmg_workspace_tab_id, 7002);
 });
 
 test('workspace router narrows close-tabs to the GPT tab', async (t) => {
@@ -1802,24 +1862,6 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   );
 });
 
-test('workspace supplements upstream tools hidden by the pinned bridge catalog', () => {
-  assert.deepEqual(
-    workspaceSupplementalToolsForTest.map((tool) => tool.name),
-    ['chrome_computer', 'chrome_upload_file', 'chrome_handle_download'],
-  );
-  const computer = workspaceSupplementalToolsForTest.find((tool) => tool.name === 'chrome_computer');
-  assert.deepEqual(computer.inputSchema.required, ['action']);
-  assert.equal(computer.inputSchema.properties.text.type, 'string');
-  assert.match(computer.inputSchema.properties.action.description, /\btype\b/u);
-  assert.equal('windowId' in computer.inputSchema.properties, false);
-  const upload = workspaceSupplementalToolsForTest.find((tool) => tool.name === 'chrome_upload_file');
-  assert.deepEqual(upload.inputSchema.required, ['selector']);
-  assert.equal('tabId' in upload.inputSchema.properties, false);
-  assert.equal('windowId' in upload.inputSchema.properties, false);
-  const download = workspaceSupplementalToolsForTest.find((tool) => tool.name === 'chrome_handle_download');
-  assert.deepEqual(download.inputSchema.required, []);
-});
-
 test('workspace local MCP tools expose only explicit show and hide controls', () => {
   assert.deepEqual(
     workspaceLocalToolsForTest.map((tool) => tool.name),
@@ -1828,6 +1870,88 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
   for (const tool of workspaceLocalToolsForTest) {
     assert.deepEqual(tool.inputSchema, { type: 'object', properties: {}, additionalProperties: false });
   }
+});
+
+test('flow workspace patch scopes browser APIs and lifts dynamic run options', () => {
+  const fixture = `prefix
+  function ensureTab(options) {
+    const tabs = chrome.tabs.query({ active: true, currentWindow: true });
+    const created = chrome.tabs.create({ url: "about:blank", active: true });
+    chrome.tabs.sendMessage(1, { action: "ping" });
+    chrome.scripting.executeScript({ target: { tabId: 1 }, func: () => true });
+    chrome.webNavigation.getAllFrames({ tabId: 1 });
+    return chrome.tabs.get(1);
+  }
+  class FlowRunTool {
+    execute(args) {
+      return __async(this, null, function* () {
+        const {
+          flowId,
+          args: vars,
+          tabTarget,
+          refresh,
+          captureNetwork,
+          returnLogs,
+          timeoutMs,
+          startUrl
+        } = args || {};
+        if (!flowId) return createErrorResponse("flowId is required");
+        const flow = yield getFlow(flowId);
+        if (!flow) return createErrorResponse(\`Flow not found: \${flowId}\`);
+        const result2 = yield runFlow(flow, {
+          tabTarget,
+          refresh,
+          captureNetwork,
+          returnLogs,
+          timeoutMs,
+          startUrl,
+          args: vars
+        });
+        return result2;
+      });
+    }
+  }
+  class ListPublishedTool {}
+  const handleCallTool = (param) => __async(null, null, function* () {
+    const tool = toolsMap.get(param.name);
+    if (!tool) return createErrorResponse("missing");
+    try {
+      return yield tool.execute(param.args);
+    } catch (error) {
+      return createErrorResponse(String(error));
+    }
+  });
+  const RR_V3_KEEPALIVE_PORT_NAME = "rr_v3_keepalive";
+suffix`;
+  const first = patchFlowWorkspace(fixture);
+  assert.equal(first.changed, true);
+  assert.match(first.text, /BMG_FLOW_WORKSPACE_V1/u);
+  assert.match(first.text, /bmgFlowTabsQuery\(\{ active: true, currentWindow: true \}\)/u);
+  assert.match(first.text, /bmgFlowTabsSendMessage\(1, \{ action: "ping" \}\)/u);
+  assert.match(first.text, /bmgFlowScriptingExecuteScript\(\{ target: \{ tabId: 1 \}, func: \(\) => true \}\)/u);
+  assert.match(first.text, /bmgFlowWebNavigationGetAllFrames\(\{ tabId: 1 \}\)/u);
+  assert.match(first.text, /__bmg_workspace_tab_id/u);
+  assert.match(first.text, /resolvedTabTarget/u);
+  assert.match(first.text, /BMG_FLOW_TARGET_TOOLS/u);
+  const second = patchFlowWorkspace(first.text);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, first.text);
+});
+
+test('upstream public-tool patch is fully applied and deterministic on the pinned extension', () => {
+  const background = readTextFile('extension/background.js');
+  assert.match(background, /BMG_UPSTREAM_TOOL_TARGETS_V1/u);
+  assert.match(background, /BMG_FLOW_WORKSPACE_V1/u);
+  assert.match(background, /const targetTab = yield bmgResolveToolTab\(args\);/u);
+  assert.match(background, /tabId: args\.tabId,\r?\n\s*windowId: args\.windowId/u);
+  assert.match(background, /bmgFlowTabsSendMessage/u);
+  assert.match(background, /bmgFlowScriptingExecuteScript/u);
+  assert.match(background, /bmgFlowWebNavigationGetAllFrames/u);
+  const performanceTargets = background.match(/const activeTab = yield bmgResolveToolTab\(args\);/gu) || [];
+  assert.ok(performanceTargets.length >= 4, 'performance/dialog/current-tab tools should use explicit BMG target resolution');
+  const second = patchUpstreamToolsBackgroundText(background);
+  assert.equal(second.changed, false);
+  assert.equal(second.text, background);
 });
 
 
@@ -1996,5 +2120,68 @@ test('workspace defaults browser tools to background but preserves explicit fore
     ['hide', 8803],
     ['hide', 8803],
   ]);
+  assert.equal(router.visible, false);
+
+  const flow = await router.rewrite({
+    method: 'tools/call',
+    params: { name: 'flow.tab-changing-flow', arguments: { tabTarget: 'new' } },
+  });
+  assert.equal(flow.params.arguments.__bmg_workspace_window_id, 8801);
+  assert.equal(flow.params.arguments.__bmg_workspace_tab_id, 8802);
+  await router.observe(flow, workspaceToolMessage({ success: true }));
+  assert.equal(router.validated, false, 'flow may change the active workspace tab and must force revalidation');
+});
+
+test('element selection shows only the BMG workspace and hides it after completion', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-picker-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const transitions = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile: path.join(rootDir, 'workspace.json'),
+    bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
+    claimWindow: async () => ({ hwnd: 8903 }),
+    showWindow: async (hwnd) => {
+      transitions.push(['show', hwnd]);
+      return { hwnd, visible: true, foreground: true };
+    },
+    ensureWindowHidden: async (hwnd) => {
+      transitions.push(['hide', hwnd]);
+      return { hwnd, visible: false, hidden: true };
+    },
+    callTool: async (name, args) => {
+      if (name === 'chrome_navigate' && args.newWindow === true) {
+        return workspaceToolMessage({
+          success: true,
+          windowId: 8901,
+          tabs: [{ tabId: 8902, url: args.url }],
+        });
+      }
+      if (name === 'get_windows_and_tabs') {
+        return workspaceToolMessage({
+          windows: [{ windowId: 8901, tabs: [{ tabId: 8902, active: true }] }],
+        });
+      }
+      throw new Error('Unexpected internal tool call: ' + name);
+    },
+  });
+
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: {
+      name: 'chrome_request_element_selection',
+      arguments: { requests: [{ name: 'Target' }] },
+    },
+  });
+  assert.equal(rewritten.params.arguments.windowId, 8901);
+  assert.equal(rewritten.params.arguments.tabId, 8902);
+  assert.deepEqual(transitions, [['show', 8903]]);
+  assert.equal(router.visible, true);
+
+  await router.observe(
+    rewritten,
+    workspaceToolMessage({ success: true, elements: [{ ref: 'ref_1' }] }),
+  );
+  assert.deepEqual(transitions, [['show', 8903], ['hide', 8903]]);
   assert.equal(router.visible, false);
 });
