@@ -46,6 +46,18 @@ function requireStatus(result, status) {
   }
 }
 
+function readEffectiveUpstreamSessionId() {
+  const state = JSON.parse(fs.readFileSync(config.upstreamSessionFile, 'utf8'));
+  if (
+    state?.upstreamUrl !== config.upstreamUrl ||
+    typeof state?.sessionId !== 'string' ||
+    !state.sessionId
+  ) {
+    throw new Error('Persisted upstream MCP session state was incomplete.');
+  }
+  return state.sessionId;
+}
+
 async function runRound(round, approvalSecret) {
   const stagePrefix = 'round ' + round + ': ';
   stage = stagePrefix + 'registration';
@@ -250,6 +262,7 @@ async function runRound(round, approvalSecret) {
   if (!safeToolResult || safeToolResult.isError === true) {
     throw new Error('Read-only tool returned an error.');
   }
+  const effectiveSessionId = readEffectiveUpstreamSessionId();
 
   stage = stagePrefix + 'MCP session cleanup';
   const closeSession = await request('/bmg/mcp', {
@@ -282,6 +295,7 @@ async function runRound(round, approvalSecret) {
 
   return {
     sessionId,
+    effectiveSessionId,
     toolCount: toolList.length,
     screenshotTool: screenshotTool.name,
     safeToolName,
@@ -296,7 +310,7 @@ async function main() {
 
   const roundOne = await runRound(1, approvalSecret);
   const roundTwo = await runRound(2, approvalSecret);
-  if (roundOne.sessionId !== roundTwo.sessionId) {
+  if (roundOne.effectiveSessionId !== roundTwo.effectiveSessionId) {
     throw new Error('The upstream MCP session was not reused between rounds.');
   }
 
