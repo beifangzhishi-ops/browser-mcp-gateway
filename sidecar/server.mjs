@@ -75,6 +75,131 @@ const WORKSPACE_LOCAL_TOOLS = [
 ];
 const WORKSPACE_SUPPLEMENTAL_UPSTREAM_TOOLS = [
   {
+    name: 'chrome_computer',
+    description:
+      "Use a mouse and keyboard to interact with a web browser, and take screenshots. Prefer refs from chrome_read_page when targeting elements.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number', description: 'Target tab ID (default: active tab)' },
+        background: {
+          type: 'boolean',
+          description:
+            'Avoid focusing/activating tab/window for certain operations (best-effort). Default: false',
+        },
+        action: {
+          type: 'string',
+          description:
+            'Action to perform: left_click | right_click | double_click | triple_click | left_click_drag | scroll | scroll_to | type | key | fill | fill_form | hover | wait | resize_page | zoom | screenshot',
+        },
+        ref: {
+          type: 'string',
+          description:
+            'Element ref from chrome_read_page. For click/scroll/scroll_to/key/type and drag end when provided; takes precedence over coordinates.',
+        },
+        coordinates: {
+          type: 'object',
+          properties: {
+            x: { type: 'number', description: 'X coordinate' },
+            y: { type: 'number', description: 'Y coordinate' },
+          },
+          description:
+            'Coordinates for actions (in screenshot space if a recent screenshot was taken, otherwise viewport). Required for click/scroll and as end point for drag.',
+        },
+        startCoordinates: {
+          type: 'object',
+          properties: {
+            x: { type: 'number' },
+            y: { type: 'number' },
+          },
+          description: 'Starting coordinates for drag action',
+        },
+        startRef: {
+          type: 'string',
+          description: 'Drag start ref from chrome_read_page (alternative to startCoordinates).',
+        },
+        scrollDirection: {
+          type: 'string',
+          description: 'Scroll direction: up | down | left | right',
+        },
+        scrollAmount: {
+          type: 'number',
+          description: 'Scroll ticks (1-10), default 3',
+        },
+        text: {
+          type: 'string',
+          description:
+            'Text to type (for action=type) or keys/chords separated by space (for action=key, e.g. "Backspace Enter" or "cmd+a")',
+        },
+        repeat: {
+          type: 'number',
+          description:
+            'For action=key: number of times to repeat the key sequence (integer 1-100, default 1).',
+        },
+        modifiers: {
+          type: 'object',
+          description:
+            'Modifier keys for click actions (left_click/right_click/double_click/triple_click).',
+          properties: {
+            altKey: { type: 'boolean' },
+            ctrlKey: { type: 'boolean' },
+            metaKey: { type: 'boolean' },
+            shiftKey: { type: 'boolean' },
+          },
+        },
+        region: {
+          type: 'object',
+          description:
+            'For action=zoom: rectangular region to capture (x0,y0)-(x1,y1) in viewport pixels (or screenshot-space if a recent screenshot context exists).',
+          properties: {
+            x0: { type: 'number' },
+            y0: { type: 'number' },
+            x1: { type: 'number' },
+            y1: { type: 'number' },
+          },
+          required: ['x0', 'y0', 'x1', 'y1'],
+        },
+        selector: {
+          type: 'string',
+          description: 'CSS selector for fill (alternative to ref).',
+        },
+        value: {
+          oneOf: [{ type: 'string' }, { type: 'boolean' }, { type: 'number' }],
+          description: 'Value to set for action=fill (string | boolean | number)',
+        },
+        elements: {
+          type: 'array',
+          description: 'For action=fill_form: list of elements to fill (ref + value)',
+          items: {
+            type: 'object',
+            properties: {
+              ref: { type: 'string', description: 'Element ref from chrome_read_page' },
+              value: { type: 'string', description: 'Value to set (stringified if non-string)' },
+            },
+            required: ['ref', 'value'],
+          },
+        },
+        width: { type: 'number', description: 'For action=resize_page: viewport width' },
+        height: { type: 'number', description: 'For action=resize_page: viewport height' },
+        appear: {
+          type: 'boolean',
+          description:
+            'For action=wait with text: whether to wait for the text to appear (true, default) or disappear (false)',
+        },
+        timeout: {
+          type: 'number',
+          description:
+            'For action=wait with text: timeout in milliseconds (default 10000, max 120000)',
+        },
+        duration: {
+          type: 'number',
+          description: 'Seconds to wait for action=wait (max 30s)',
+        },
+      },
+      required: ['action'],
+    },
+  },
+  {
     name: 'chrome_upload_file',
     description:
       'Upload a local, URL, or base64-backed file directly into an input[type=file] in the dedicated BMG workspace via CDP, bypassing the Windows file picker.',

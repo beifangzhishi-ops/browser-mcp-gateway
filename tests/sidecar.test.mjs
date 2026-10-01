@@ -1653,13 +1653,13 @@ test('stale v2 HWND ownership is retired without closing the reported browser ta
   assert.equal(rewritten.params.arguments.tabId, 9902);
 });
 
-test('legacy v1 workspace state is retired without touching the stale browser window', async (t) => {
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-legacy-test-'));
+test('unsupported workspace state is retired without touching the stale browser window', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-unsupported-state-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
   fs.writeFileSync(
     stateFile,
-    JSON.stringify({ version: 1, windowId: 9201, tabId: 9202, hwnd: 9203 }),
+    JSON.stringify({ version: 999, windowId: 9201, tabId: 9202, hwnd: 9203 }),
     'utf8',
   );
   const calls = [];
@@ -1802,8 +1802,16 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   );
 });
 
-test('workspace supplements hidden upstream file transfer tools', () => {
-  assert.deepEqual(workspaceSupplementalToolsForTest.map((tool) => tool.name), ['chrome_upload_file', 'chrome_handle_download']);
+test('workspace supplements upstream tools hidden by the pinned bridge catalog', () => {
+  assert.deepEqual(
+    workspaceSupplementalToolsForTest.map((tool) => tool.name),
+    ['chrome_computer', 'chrome_upload_file', 'chrome_handle_download'],
+  );
+  const computer = workspaceSupplementalToolsForTest.find((tool) => tool.name === 'chrome_computer');
+  assert.deepEqual(computer.inputSchema.required, ['action']);
+  assert.equal(computer.inputSchema.properties.text.type, 'string');
+  assert.match(computer.inputSchema.properties.action.description, /\btype\b/u);
+  assert.equal('windowId' in computer.inputSchema.properties, false);
   const upload = workspaceSupplementalToolsForTest.find((tool) => tool.name === 'chrome_upload_file');
   assert.deepEqual(upload.inputSchema.required, ['selector']);
   assert.equal('tabId' in upload.inputSchema.properties, false);

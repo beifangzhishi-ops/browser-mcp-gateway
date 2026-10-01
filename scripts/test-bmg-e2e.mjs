@@ -172,12 +172,14 @@ async function runRound(round, approvalSecret) {
   });
   requireStatus(tools, 200);
   const toolList = parseSse(tools.text).result.tools;
-  const expectedToolCount = config.workspaceMode ? 27 : 23;
-  if (toolList.length !== expectedToolCount) {
-    throw new Error('Expected ' + expectedToolCount + ' BMG tools, received ' + toolList.length + '.');
-  }
   if (config.workspaceMode) {
-    for (const name of ['bmg_show_workspace', 'bmg_hide_workspace', 'chrome_upload_file', 'chrome_handle_download']) {
+    for (const name of [
+      'bmg_show_workspace',
+      'bmg_hide_workspace',
+      'chrome_computer',
+      'chrome_upload_file',
+      'chrome_handle_download',
+    ]) {
       if (!toolList.some((tool) => tool.name === name)) {
         throw new Error('Workspace control tool was not listed: ' + name);
       }

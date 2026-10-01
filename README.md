@@ -90,7 +90,7 @@ node scripts\test-bmg-e2e.mjs
 
 该检查连续运行两轮 OAuth/PKCE，并验证两轮共享同一个 upstream MCP session。每轮的下游 DELETE 只关闭客户端视角的 session，不会关闭共享 upstream transport；sidecar 停止时关闭自身监听并保留该 session 的非敏感元数据，重启后继续复用。这样兼容 upstream 的 singleton transport 生命周期。
 
-文件传输：在 workspace 模式下，BMG 会补充暴露 upstream 已实现但默认 tools/list 未列出的 chrome_upload_file 和 chrome_handle_download。上传应优先使用 chrome_upload_file 直接通过 CDP DOM.setFileInputFiles 设置 <input type=file>，避免点击控件后弹出 Windows 文件选择器；chrome_handle_download 用于等待浏览器管理的下载并返回最终本机文件路径、状态和大小。Windows 原生 File System Access / Save As 对话框不属于这两个工具的控制范围，必要时使用 mg_show_workspace 进行人工处理。
+workspace 模式会补充暴露 pinned bridge mcp-chrome-bridge@1.0.29 的静态 tools/list 漏掉、但当前 upstream extension 已实现的 chrome_computer、chrome_upload_file 和 chrome_handle_download。chrome_computer 的 type action 使用 CDP Input.insertText，可向 contenteditable / ProseMirror 输入任意文本；BMG 仍会将该工具固定到 ownership-verified workspace tab。上传应优先使用 chrome_upload_file 直接通过 CDP DOM.setFileInputFiles 设置 <input type=file>，避免弹出 Windows 文件选择器；chrome_handle_download 用于等待浏览器管理的下载并返回最终本机文件路径、状态和大小。Windows 原生 File System Access / Save As 对话框不在这些工具的控制范围内，必要时使用 bmg_show_workspace 人工处理。
 
 configure-funnel.ps1 和 disable-funnel.ps1 默认只输出预览；本阶段不实际修改 Tailscale Funnel。未来若明确需要应用，才显式使用 -Apply，脚本也只处理 BMG 自己的精确 OAuth/MCP 路径。
 
@@ -128,6 +128,8 @@ sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周�
 - Extension archive SHA256: `e0f7edfe84b64fd452deec048fc202cfa33585943da63a06c08e2bbc97770f6a`
 
 The source checkout is kept under ignored `upstream/mcp-chrome/` for inspection only. Runtime uses the upstream npm bridge package and release extension rather than a locally modified fork.
+
+The pinned bridge remains on 1.0.29 deliberately. Newer mcp-chrome-bridge@1.0.31 publishes chrome_computer through chrome-mcp-shared@1.0.2, but it also changes the public tool catalog and tool-result shape. BMG therefore exposes the missing upstream tools it needs without replacing the currently validated bridge runtime.
 
 ## Requirements
 
