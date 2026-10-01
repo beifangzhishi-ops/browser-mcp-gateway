@@ -250,6 +250,33 @@ After the Edge extension is connected, local port 12306 is listening, and the si
 
 The first command is preview-only. The second command applies only the BMG route list. The ChatGPT custom MCP server URL is https://your-machine.your-tailnet.ts.net/bmg/mcp.
 
+## ChatGPT plugin/app rebuild
+
+Any change to the public MCP `tools/list`, tool names, tool descriptions, or input schemas requires rebuilding/reconnecting the ChatGPT plugin/app after the new BMG runtime is already serving the updated schema.
+
+On this machine, BMG keeps the public resource in:
+
+```text
+C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\config\.env
+```
+
+and the current OAuth approval key in:
+
+```text
+C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\.state\bmg-approval-secret.txt
+```
+
+Run the following **directly in the current PowerShell session** to print the two values needed by the ChatGPT rebuild UI. Do not wrap this block inside another `powershell.exe -Command "..."`, because an outer double-quoted command can expand the `$...` variables before the inner PowerShell receives them.
+
+```powershell
+$bmgKey = (Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\.state\bmg-approval-secret.txt' -Raw).Trim()
+$bmgUrl = ((Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\config\.env' | Where-Object { $_ -match '^BMG_RESOURCE=' } | Select-Object -First 1) -replace '^BMG_RESOURCE=', '').Trim().Trim('"')
+Write-Output ("BMG key: " + $bmgKey)
+Write-Output ("BMG URL: " + $bmgUrl)
+```
+
+The printed key is local secret material. Enter it only in the plugin/app OAuth approval flow; do not paste it into chat, logs, issues, or committed files. The repository defaults `BMG_APPROVAL_SECRET_FILE` to `.state/bmg-approval-secret.txt`; if that configuration is intentionally changed, use the configured path instead.
+
 
 ## Status
 
@@ -281,7 +308,7 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 39/39.
 
-The current CCM sandbox cannot complete the machine-wide npm upgrade because it cannot write the user's global npm directory or run npm lifecycle child processes. Before live BMG E2E validation, run the repository setup script locally outside CCM so the installed bridge, Native Messaging registration, and Edge extension all use the new runtime.
+The machine-wide runtime is now deployed with `mcp-chrome-bridge@1.0.31` / `chrome-mcp-shared@1.0.2`. Edge Native Messaging registration points at the installed 1.0.31 host, local ports 12306 and 18007 were validated together, and the live OAuth/MCP E2E passes two rounds with `tools_count=29` (27 upstream static tools plus the two BMG workspace controls), refresh-token rotation, revocation, a real read-only upstream tool call, and stable upstream-session reuse. Public protected-resource metadata returns 200 and unauthenticated `/bmg/mcp` returns the expected 401.
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 
