@@ -42,7 +42,7 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 .\scripts\install-autostart.ps1
 ```
 
-计划任务 `BMG Sidecar` 在当前用户登录 Windows 时执行 `start.ps1 -EnsureWorkspace`。它先启动或复用 BMG 服务，再检查专用浏览器工作区：已有窗口则复用，窗口缺失则创建隐藏工作区。如果创建失败，脚本会检查当前 Windows 会话的 Edge 进程；Edge 未运行时，使用默认用户配置启动一个空白窗口，然后等待扩展自动连接并再次创建工作区。已有 Edge 时保持其进程和用户配置。
+计划任务 `BMG Sidecar` 在当前用户登录 Windows 时执行 `start.ps1 -EnsureWorkspace`。它先启动或复用 BMG sidecar，再检查专用浏览器工作区。工作区准备失败时，即使当前会话已经存在无关 Edge 进程，恢复流程仍会新建一个隐藏的、带一次性 nonce 的 bootstrap Edge 窗口；普通 Edge 窗口和 profile 不会被复用、移动、关闭或改作 BMG 工作区。bootstrap claim 在 30 秒 grace 内保持待认领状态，重复恢复会复用这份 pending state，不覆盖 nonce，也不再创建第二个 bootstrap 窗口。扩展随后可重新连接 native bridge，sidecar 只认领通过 ownership 校验的 bootstrap 窗口。
 
 需在 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1`，并在所用 Edge 配置中安装、启用 BMG 扩展及其自动连接。工作区检查失败后依次等待 10、20、40 秒重试；最终失败会让计划任务报错，由任务按每分钟一次、最多三次的设置重试。日志位于 `logs/bmg-workspace-startup.log`。每次任务触发都会重新核对工作区是否存在；任务完成后不持续监控窗口。Windows 重启后需登录当前用户才触发任务。
 
@@ -296,13 +296,13 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 新工作区创建不再传固定的 480×360 尺寸。`scripts/patch-extension-web-content.mjs` 只负责内容/交互与窗口几何补丁；导航相关修复统一由 `scripts/patch-extension-navigation.mjs` 维护。调用方未指定宽高时，`chrome.windows.create` 不再自动补入上游默认的 1280×720；导航若已给出显式 `tabId`，会优先直接操作该标签，不再先做全局 URL pattern 查询。URL pattern 只对 HTTP/HTTPS 生成，`about:` 等非 HTTP(S) scheme 不进入 match-pattern 查询；`127.0.0.1`、IPv6 和 `localhost` 也不会生成非法的 `www.` 变体。这样 workspace bootstrap 和空闲清理的 `about:blank` 都不会再因 URL pattern 校验在真正导航前失败。旧的 v1 工作区状态没有可验证 marker，会被安全退休；不会凭旧 HWND 去移动、显示或关闭旧窗口。因此其他机器若仍保留由 v1 对应的旧窗口，该窗口可能继续存在到用户关闭它或 Edge 重启，BMG 不会为了去重而猜测归属后强行清理。
 
-登录准备时，`scripts/ensure-edge.ps1` 只在当前交互会话没有 Edge 时启动浏览器。新启动窗口使用一次性 `/workspace-bootstrap?nonce=...` URL，并把 nonce 与 ownership marker 写到 `.state/bmg-edge-bootstrap.json`；脚本会立即尝试用同一个真正隐藏 helper 认领并 `SW_HIDE` 该窗口。sidecar 随后只认领 URL 中 nonce 完全匹配的窗口，不再额外创建第二个空白窗口。若扩展尚未连接，启动流程保持有限重试，不把“存在 Edge 进程”当成“工作区已经可用”。
+登录准备时，`scripts/ensure-edge.ps1` 会为失败的工作区准备启动一个隐藏的 `/workspace-bootstrap?nonce=...` 窗口，并把 nonce 与 ownership marker 写入 `.state/bmg-edge-bootstrap.json`。已有无关 Edge 进程不会阻止该恢复启动；若该 bootstrap state 仍处于与 sidecar 一致的 30 秒 claim grace 内，后续恢复调用会直接复用 pending claim，不再启动重复窗口。helper 会立即尝试隐藏这个 nonce 窗口，sidecar 后续只认领 URL、nonce、marker、进程身份和 HWND 全部校验成功的窗口。
 
-普通使用请求也有一次有限恢复路径：首次工作区准备失败后，sidecar 调用同一个 `ensure-edge.ps1`，默认按 1 秒、2.5 秒、5 秒间隔重试工作区准备。该脚本在当前会话已有 Edge 时不会新启动进程，因此这不是持续监控，也不会在用户没有使用请求时反复拉起主动退出的 Edge。若浏览器／扩展仍未就绪，请求最终按错误返回，不无限创建窗口。
+普通使用请求遵循同一恢复规则：首次工作区准备失败后，sidecar 调用一次 `ensure-edge.ps1`，随后按 1 秒、2.5 秒、5 秒间隔重试工作区准备。仅有后台残留 Edge 进程不能再阻断恢复；新 bootstrap 窗口只用于重新建立 extension/native bridge 链路，在 ownership 校验完成前 BMG 不会控制它。
 
 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` 控制自动清理，默认 `1800` 秒。浏览器工具活动会刷新期限；到期后 BMG 重新验证 ownership，通过内部 `chrome_javascript`/CDP 在明确的保留 `tabId` 上执行 `location.replace("about:blank")`，然后只关闭同一受控窗口中的额外标签页，并保留一个真正隐藏的空白标签页。这里不再经过 `chrome_navigate` 的 URL-pattern 预检查，因此即使当前 Edge 尚未重新加载最新 extension patch，空闲清理也不受 `about:///*` 缺陷影响。设置为 `0` 可禁用空闲清理。读历史、书签、窗口列表等全局工具仍不是 window-scoped。
 
-自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、空闲清理阶段化错误日志、默认后台与显式前台语义、人工显示后恢复隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 39/39 通过。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，本机配置已恢复为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=1800`。
+自动化验证目前覆盖：startup nonce 去重认领、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、空闲清理阶段化错误日志、默认后台与显式前台语义、人工显示后恢复隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 39/39 通过。2026-10-02 已实机验证本次恢复修复：故障开始时 18007 正常而 12306 未监听，且仅有后台 Edge 进程；新恢复流程成功创建 ownership bootstrap，触发 Edge extension/native host 重连，随后 `127.0.0.1:12306` 恢复监听，`bmgctl workspace` 返回 `success=true` 且工作区保持 `visible=false`，正式 BMG MCP 调用恢复成功。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，本机配置已恢复为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=1800`。
 
 ### Upstream parity validation (2026-10-01)
 

@@ -1,17 +1,12 @@
 $ErrorActionPreference = "Stop"
-$script:edgeRunning = $true
-$script:edgeSession = 7
 $script:edgeInstalled = $true
 $script:starts = @()
 
-function Get-Process {
-    [CmdletBinding()]
-    param([int]$Id, [string]$Name)
-    if ($Id) { return [pscustomobject]@{ SessionId = 7 } }
-    if ($script:edgeRunning) { return [pscustomobject]@{ SessionId = $script:edgeSession } }
-}
 function Test-Path {
     param([string]$LiteralPath)
+    if ($script:stateFile -and $LiteralPath -eq $script:stateFile) {
+        return Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+    }
     return $script:edgeInstalled
 }
 function Start-Process {
@@ -20,15 +15,14 @@ function Start-Process {
 }
 
 $entry = Join-Path $PSScriptRoot "..\scripts\ensure-edge.ps1"
-$stateFile = Join-Path ([System.IO.Path]::GetTempPath()) ("bmg-edge-startup-" + [Guid]::NewGuid().ToString("N") + ".json")
+$stateDir = Join-Path $PSScriptRoot "..\.state"
+New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+$script:stateFile = Join-Path $stateDir ("bmg-edge-startup-test-" + [Guid]::NewGuid().ToString("N") + ".json")
+$stateFile = $script:stateFile
 $invoke = { . $entry -Port 18007 -BootstrapStateFile $stateFile -SkipInitialHide }
 
 & $invoke
-if ($script:starts.Count -ne 0) { throw "Existing Edge must be reused." }
-
-$script:edgeRunning = $false
-& $invoke
-if ($script:starts.Count -ne 1 -or $script:starts[0].Style -ne "Hidden") { throw "Missing Edge must start hidden once." }
+if ($script:starts.Count -ne 1 -or $script:starts[0].Style -ne "Hidden") { throw "Workspace recovery must start one hidden Edge bootstrap window." }
 $bootstrap = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
 $expectedUrl = "http://127.0.0.1:18007/workspace-bootstrap?nonce=$($bootstrap.nonce)"
 if ($script:starts[0].Args -notcontains $expectedUrl) { throw "Startup Edge must use the owned bootstrap URL." }
@@ -37,12 +31,15 @@ if ([int]$bootstrap.version -ne 1 -or [string]::IsNullOrWhiteSpace($bootstrap.no
     throw "Bootstrap ownership state is invalid."
 }
 
-$script:edgeRunning = $true
-$script:edgeSession = 8
 & $invoke
-if ($script:starts.Count -ne 2) { throw "Another session must not suppress startup." }
+if ($script:starts.Count -ne 1) { throw "An active bootstrap claim must suppress duplicate recovery windows." }
 
-$script:edgeRunning = $false
+$stale = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+$stale.createdAtMs = 1
+$stale | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
+& $invoke
+if ($script:starts.Count -ne 2) { throw "A stale bootstrap claim must allow a new owned recovery window." }
+
 $script:edgeInstalled = $false
 $failed = $false
 try { & $invoke } catch { $failed = $true }

@@ -6,10 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$sessionId = (Get-Process -Id $PID).SessionId
-$existing = Get-Process -Name msedge -ErrorAction SilentlyContinue |
-    Where-Object { $_.SessionId -eq $sessionId } | Select-Object -First 1
-if ($null -ne $existing) { return }
+$startupStateClaimGraceMs = 30000
 
 $candidates = @(
     ${env:ProgramFiles(x86)},
@@ -27,6 +24,27 @@ if ([string]::IsNullOrWhiteSpace($BootstrapStateFile)) {
 }
 $stateDir = Split-Path -Parent $BootstrapStateFile
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+
+if (Test-Path -LiteralPath $BootstrapStateFile) {
+    try {
+        $existingBootstrap = Get-Content -LiteralPath $BootstrapStateFile -Raw | ConvertFrom-Json
+        $createdAtMs = [int64]$existingBootstrap.createdAtMs
+        $ageMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $createdAtMs
+        if (
+            [int]$existingBootstrap.version -eq 1 -and
+            $existingBootstrap.nonce -match '^[A-Za-z0-9._-]{1,100}$' -and
+            [int64]$existingBootstrap.windowMarker -gt 0 -and
+            $ageMs -ge 0 -and
+            $ageMs -le $startupStateClaimGraceMs
+        ) {
+            return
+        }
+    }
+    catch {
+        # Invalid or stale startup state is replaced below.
+    }
+}
+
 $nonce = "startup-" + [Guid]::NewGuid().ToString("N")
 $windowMarker = Get-Random -Minimum 1 -Maximum 2147483647
 $createdAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()

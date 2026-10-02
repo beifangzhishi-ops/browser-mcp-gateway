@@ -194,7 +194,7 @@ test('启动流程遇到配置错误立即失败，扩展持续离线时有限�
   assert.equal(attempts, 4);
 });
 
-test('Windows 启动脚本仅在当前会话缺少 Edge 时启动浏览器', {
+test('Windows startup recovery launches an owned bootstrap even when Edge already exists', {
   skip: process.platform !== 'win32',
 }, () => {
   const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
