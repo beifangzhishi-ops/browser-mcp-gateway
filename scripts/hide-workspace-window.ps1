@@ -8,6 +8,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 2147483647)]
     [long]$WindowMarker,
+    [Parameter(ParameterSetName = 'Nonce')]
+    [switch]$Retire,
     [Parameter(ParameterSetName = 'Hwnd')]
     [switch]$InspectOnly,
     [int]$TimeoutMs = 7000
@@ -41,6 +43,7 @@ public static class BmgWorkspaceWin32 {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll", EntryPoint="SetWindowLongPtrW")] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
@@ -60,6 +63,7 @@ $SWP_NOZORDER = 0x0004
 $SWP_NOACTIVATE = 0x0010
 $SWP_FRAMECHANGED = 0x0020
 $FLASHW_STOP = 0x00000000
+$WM_CLOSE = 0x0010
 
 function Clear-BmgProcessAttention([uint32]$ProcessId) {
     [BmgWorkspaceWin32]::EnumWindows({
@@ -119,22 +123,40 @@ do {
     if ($PSCmdlet.ParameterSetName -eq 'Hwnd') {
         $target = [IntPtr]$TargetHwnd
     } else {
-        $matches = [System.Collections.Generic.List[System.IntPtr]]::new()
+        $markerMatches = [System.Collections.Generic.List[System.IntPtr]]::new()
+        $titleMatches = [System.Collections.Generic.List[System.IntPtr]]::new()
         [BmgWorkspaceWin32]::EnumWindows({
             param([IntPtr]$hWnd, [IntPtr]$lParam)
             [uint32]$processId = 0
             [void][BmgWorkspaceWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
             try { $process = Get-Process -Id $processId -ErrorAction Stop } catch { return $true }
             if ($process.ProcessName -ne 'msedge') { return $true }
+            $marker = [int64][BmgWorkspaceWin32]::GetProp($hWnd, $propertyName)
+            if ($marker -eq $WindowMarker) {
+                $markerMatches.Add($hWnd)
+                return $true
+            }
             $title = [System.Text.StringBuilder]::new(1024)
             [void][BmgWorkspaceWin32]::GetWindowText($hWnd, $title, $title.Capacity)
-            if ($title.ToString().Contains($needle)) { $matches.Add($hWnd) }
+            $windowTitle = $title.ToString()
+            if (
+                [string]::Equals($windowTitle, $needle, [StringComparison]::Ordinal) -or
+                $windowTitle.StartsWith($needle + " - ", [StringComparison]::Ordinal)
+            ) {
+                $titleMatches.Add($hWnd)
+            }
             return $true
         }, [IntPtr]::Zero) | Out-Null
-        if ($matches.Count -gt 1) {
-            throw "Multiple Edge windows matched the BMG workspace nonce. Refusing to modify any window."
+        if ($markerMatches.Count -gt 1) {
+            throw "Multiple Edge windows carried the BMG workspace ownership marker. Refusing to modify any window."
         }
-        if ($matches.Count -eq 1) { $target = $matches[0] }
+        if ($markerMatches.Count -eq 1) {
+            $target = $markerMatches[0]
+        } elseif ($titleMatches.Count -gt 1) {
+            throw "Multiple Edge windows matched the BMG workspace nonce. Refusing to modify any window."
+        } elseif ($titleMatches.Count -eq 1) {
+            $target = $titleMatches[0]
+        }
     }
     if ($target -ne [IntPtr]::Zero) {
         $info = Get-BmgWindowInfo $target
@@ -147,6 +169,20 @@ do {
             }
         } elseif ($info.marker -ne $WindowMarker) {
             throw "BMG workspace ownership marker mismatch."
+        }
+
+        if ($Retire) {
+            if (-not [BmgWorkspaceWin32]::PostMessage($target, [uint32]$WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)) {
+                throw "BMG workspace window close request failed."
+            }
+            do {
+                Start-Sleep -Milliseconds 100
+            } while ([BmgWorkspaceWin32]::IsWindow($target) -and [DateTime]::UtcNow -lt $deadline)
+            if ([BmgWorkspaceWin32]::IsWindow($target)) {
+                throw "Timed out retiring the BMG workspace Edge window."
+            }
+            [pscustomobject]@{ retired = $true; hwnd = [int64]$target } | ConvertTo-Json -Compress
+            exit 0
         }
 
         if ($InspectOnly) {
@@ -183,6 +219,10 @@ do {
             throw "BMG workspace hide unexpectedly changed window geometry."
         }
         $after | ConvertTo-Json -Compress
+        exit 0
+    }
+    if ($Retire) {
+        [pscustomobject]@{ retired = $false; missing = $true } | ConvertTo-Json -Compress
         exit 0
     }
     Start-Sleep -Milliseconds 100

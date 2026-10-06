@@ -1171,7 +1171,7 @@ test('startup bootstrap window is claimed exactly once without creating a duplic
   assert.equal(saved.processId, 9605);
 });
 
-test('expired startup claim grace retires an orphan nonce before creating a new workspace', async (t) => {
+test('expired startup claim grace preserves the orphan state for browser recovery', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-startup-orphan-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
@@ -1187,42 +1187,33 @@ test('expired startup claim grace retires an orphan nonce before creating a new 
     'utf8',
   );
   const calls = [];
-  const claims = [];
   const router = new BrowserWorkspaceRouter({
     enabled: true,
     stateFile,
     startupStateFile,
     bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
     clock: () => 32001,
-    claimWindow: async (nonce, marker) => {
-      claims.push({ nonce, marker });
-      assert.notEqual(nonce, 'startup-orphan');
-      return { hwnd: 9663, marker, visible: false };
-    },
-    callTool: async (name, args) => {
+    claimWindow: async () => assert.fail('stale bootstrap must not be replaced inside the router'),
+    callTool: async (name) => {
       calls.push(name);
       if (name === 'get_windows_and_tabs') {
         return workspaceToolMessage({ windows: [] });
       }
-      if (name === 'chrome_navigate') {
-        return workspaceToolMessage({
-          success: true,
-          windowId: 9661,
-          tabs: [{ tabId: 9662, url: args.url }],
-        });
-      }
       throw new Error('Unexpected internal tool call: ' + name);
     },
   });
-  const rewritten = await router.rewrite({
-    method: 'tools/call',
-    params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
-  });
-  assert.deepEqual(calls, ['get_windows_and_tabs', 'chrome_navigate']);
-  assert.equal(claims.length, 1);
-  assert.equal(fs.existsSync(startupStateFile), false);
-  assert.equal(rewritten.params.arguments.windowId, 9661);
-  assert.equal(rewritten.params.arguments.tabId, 9662);
+  await assert.rejects(
+    () => router.rewrite({
+      method: 'tools/call',
+      params: { name: 'chrome_get_web_content', arguments: { textContent: true } },
+    }),
+    /stale and must be retired before replacement/u,
+  );
+  assert.deepEqual(calls, ['get_windows_and_tabs']);
+  assert.equal(fs.existsSync(startupStateFile), true);
+  const pending = JSON.parse(fs.readFileSync(startupStateFile, 'utf8'));
+  assert.equal(pending.nonce, 'startup-orphan');
+  assert.equal(pending.windowMarker, 9654);
 });
 
 test('workspace request performs finite browser recovery and claims the recovered startup window', async (t) => {
@@ -1650,7 +1641,7 @@ test('persisted v2 workspace verifies ownership before restoring hidden state', 
   assert.equal(rewritten.params.arguments.windowId, 9101);
   assert.equal(rewritten.params.arguments.tabId, 9102);
 
-  await router.observe(
+  await router.settleToolCall(
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9101, tabId: 9102 }),
   );
@@ -1765,10 +1756,49 @@ test('post-navigation hide maintenance failure does not turn a browser success i
     jsonrpc: '2.0', id: 6, method: 'tools/call',
     params: { name: 'chrome_navigate', arguments: { url: 'https://example.com/' } },
   });
-  await assert.doesNotReject(() => router.observe(
+  await assert.doesNotReject(() => router.settleToolCall(
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9401, tabId: 9402 }),
   ));
+  assert.equal(router.validated, false);
+});
+
+test('foreground workspace is re-hidden after an upstream transport failure', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-transport-failure-test-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const transitions = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile: path.join(rootDir, 'workspace.json'),
+    bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
+    claimWindow: async (_nonce, marker) => ({ hwnd: 9453, marker, visible: false }),
+    showWindow: async (hwnd) => {
+      transitions.push(['show', hwnd]);
+      return { hwnd, visible: true, foreground: true };
+    },
+    ensureWindowHidden: async (hwnd) => {
+      transitions.push(['hide', hwnd]);
+      return { hwnd, visible: false, hidden: true };
+    },
+    callTool: async (name, args) => {
+      assert.equal(name, 'chrome_navigate');
+      assert.equal(args.newWindow, true);
+      return workspaceToolMessage({ success: true, windowId: 9451, tabs: [{ tabId: 9452, url: args.url }] });
+    },
+  });
+  const rewritten = await router.rewrite({
+    method: 'tools/call',
+    params: {
+      name: 'chrome_navigate',
+      arguments: { url: 'https://example.com/', background: false },
+    },
+  });
+  assert.deepEqual(transitions, [['show', 9453]]);
+  assert.equal(router.visible, true);
+
+  await router.settleToolCall(rewritten, null, new Error('connect ECONNREFUSED 127.0.0.1:12306'));
+  assert.deepEqual(transitions, [['show', 9453], ['hide', 9453]]);
+  assert.equal(router.visible, false);
   assert.equal(router.validated, false);
 });
 
@@ -1784,6 +1814,9 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(script, /BMG_BROWSER_MCP_WORKSPACE_V1/u);
   assert.match(script, /GetProp/u);
   assert.match(script, /SetProp/u);
+  assert.match(script, /PostMessage/u);
+  assert.match(script, /WM_CLOSE/u);
+  assert.match(script, /\[switch\]\$Retire/u);
   assert.match(script, /ShowWindowAsync\(\$target, 0\).*SW_HIDE/u);
   assert.match(script, /SWP_NOMOVE/u);
   assert.match(script, /SWP_NOSIZE/u);
@@ -1808,6 +1841,10 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
 
   const ensureEdge = readTextFile('scripts/ensure-edge.ps1');
   assert.match(ensureEdge, /windowMarker = Get-Random/u);
+  assert.match(ensureEdge, /"-Retire"/u);
+  assert.match(ensureEdge, /BMG bootstrap action=retire/u);
+  assert.match(ensureEdge, /BMG bootstrap action=blocked/u);
+  assert.doesNotMatch(ensureEdge, /taskkill|Stop-Process/iu);
   assert.match(ensureEdge, /hide-workspace-window\.ps1/u);
   assert.match(ensureEdge, /"-Nonce", \$nonce, "-WindowMarker"/u);
 });
@@ -1843,7 +1880,7 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   assert.deepEqual(transitions, [['show', 9503]]);
   assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).visible, true);
 
-  await router.observe(
+  await router.settleToolCall(
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9501, tabId: 9502 }),
   );
@@ -2093,7 +2130,7 @@ test('workspace defaults browser tools to background but preserves explicit fore
   assert.deepEqual(transitions, [['show', 8803]]);
   assert.equal(router.visible, true);
 
-  await router.observe(
+  await router.settleToolCall(
     foreground,
     workspaceToolMessage({ success: true, windowId: 8801, tabId: 8802 }),
   );
@@ -2111,7 +2148,7 @@ test('workspace defaults browser tools to background but preserves explicit fore
   assert.deepEqual(transitions, [['show', 8803], ['hide', 8803]]);
   assert.equal(router.visible, false);
 
-  await router.observe(
+  await router.settleToolCall(
     background,
     workspaceToolMessage({ success: true, textContent: 'ok' }),
   );
@@ -2128,7 +2165,7 @@ test('workspace defaults browser tools to background but preserves explicit fore
   });
   assert.equal(flow.params.arguments.__bmg_workspace_window_id, 8801);
   assert.equal(flow.params.arguments.__bmg_workspace_tab_id, 8802);
-  await router.observe(flow, workspaceToolMessage({ success: true }));
+  await router.settleToolCall(flow, workspaceToolMessage({ success: true }));
   assert.equal(router.validated, false, 'flow may change the active workspace tab and must force revalidation');
 });
 
@@ -2178,7 +2215,7 @@ test('element selection shows only the BMG workspace and hides it after completi
   assert.deepEqual(transitions, [['show', 8903]]);
   assert.equal(router.visible, true);
 
-  await router.observe(
+  await router.settleToolCall(
     rewritten,
     workspaceToolMessage({ success: true, elements: [{ ref: 'ref_1' }] }),
   );

@@ -34,15 +34,14 @@ if ([int]$bootstrap.version -ne 1 -or [string]::IsNullOrWhiteSpace($bootstrap.no
 & $invoke
 if ($script:starts.Count -ne 1) { throw "An active bootstrap claim must suppress duplicate recovery windows." }
 
-$stale = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
-$stale.createdAtMs = 1
-$stale | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
-& $invoke
-if ($script:starts.Count -ne 2) { throw "A stale bootstrap claim must allow a new owned recovery window." }
+$entryText = Get-Content -LiteralPath $entry -Raw
+if ($entryText -notmatch '"-Retire"' -or $entryText -notmatch 'action=retire') {
+    throw "Stale bootstrap recovery must retire the owned window before replacement."
+}
 
 $script:edgeInstalled = $false
 $failed = $false
 try { & $invoke } catch { $failed = $true }
-if (-not $failed -or $script:starts.Count -ne 2) { throw "Missing executable must fail without launch." }
+if (-not $failed -or $script:starts.Count -ne 1) { throw "Missing executable must fail without launch." }
 Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
 Write-Output "Edge startup checks passed."

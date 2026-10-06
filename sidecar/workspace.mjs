@@ -5,7 +5,6 @@ import { randomInt } from 'node:crypto';
 const STATE_VERSION = 2;
 const STARTUP_STATE_VERSION = 1;
 const STARTUP_STATE_CLAIM_GRACE_MS = 30 * 1000;
-const STARTUP_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 const TARGET_TOOLS = new Set([
   'performance_start_trace',
   'performance_stop_trace',
@@ -111,7 +110,7 @@ function loadStartupState(file, now) {
     if (typeof state.nonce !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/u.test(state.nonce)) return null;
     const windowMarker = asPositiveInteger(state.windowMarker);
     if (!Number.isFinite(state.createdAtMs) || !windowMarker) return null;
-    if (now - state.createdAtMs < 0 || now - state.createdAtMs > STARTUP_STATE_MAX_AGE_MS) return null;
+    if (now - state.createdAtMs < 0) return null;
     return { nonce: state.nonce, createdAtMs: state.createdAtMs, windowMarker };
   } catch {
     return null;
@@ -461,8 +460,7 @@ export class BrowserWorkspaceRouter {
       if (this.clock() - startup.createdAtMs <= STARTUP_STATE_CLAIM_GRACE_MS) {
         throw new Error('BMG startup Edge window is not visible to the extension yet.');
       }
-      removeState(this.startupStateFile);
-      return null;
+      throw new Error('BMG startup bootstrap is stale and must be retired before replacement.');
     }
     if (matches.length !== 1) {
       throw new Error('Multiple browser tabs matched the BMG startup nonce; refusing to claim any window.');
@@ -534,17 +532,22 @@ export class BrowserWorkspaceRouter {
     return this.createWorkspace();
   }
 
-  async prepareWorkspaceWithRecovery() {
+  async prepareWorkspaceWithRecovery(context = null) {
     try {
       return await this.prepareWorkspaceOnce();
     } catch (firstError) {
       if (!this.recoverBrowser || this.recoveryDelaysMs.length === 0) throw firstError;
+      const source = context?.source || 'workspace';
+      const tool = context?.tool ? `:${context.tool}` : '';
+      this.logger?.log?.(`BMG workspace recovery start source=${source}${tool}.`);
       await this.recoverBrowser();
       let lastError = firstError;
       for (const delay of this.recoveryDelaysMs) {
         if (delay > 0) await this.wait(delay);
         try {
-          return await this.prepareWorkspaceOnce();
+          const workspace = await this.prepareWorkspaceOnce();
+          this.logger?.log?.(`BMG workspace recovery succeeded source=${source}${tool}.`);
+          return workspace;
         } catch (error) {
           lastError = error;
         }
@@ -553,7 +556,7 @@ export class BrowserWorkspaceRouter {
     }
   }
 
-  async ensureWorkspace({ revalidate = false } = {}) {
+  async ensureWorkspace({ revalidate = false, context = null } = {}) {
     if (!this.enabled) return null;
     if (this.idleCleanup) await this.idleCleanup;
     if (revalidate) this.validated = false;
@@ -561,7 +564,7 @@ export class BrowserWorkspaceRouter {
       return { windowId: this.windowId, tabId: this.tabId, hwnd: this.hwnd, visible: this.visible };
     }
     if (this.initializing) return this.initializing;
-    const task = this.prepareWorkspaceWithRecovery();
+    const task = this.prepareWorkspaceWithRecovery(context);
     this.initializing = task;
     try {
       return await task;
@@ -599,7 +602,7 @@ export class BrowserWorkspaceRouter {
     this.clearIdleTimer();
   }
 
-  async rewrite(payload) {
+  async rewrite(payload, { source = 'workspace' } = {}) {
     if (!this.enabled || payload?.method !== 'tools/call') return payload;
     const name = payload.params?.name;
     if (typeof name !== 'string') return payload;
@@ -611,7 +614,7 @@ export class BrowserWorkspaceRouter {
     ) {
       return payload;
     }
-    const workspace = await this.ensureWorkspace();
+    const workspace = await this.ensureWorkspace({ context: { source, tool: name } });
     const args = { ...(payload.params?.arguments || {}) };
     if (name === 'chrome_close_tabs') {
       delete args.url;
@@ -659,11 +662,11 @@ export class BrowserWorkspaceRouter {
     };
   }
 
-  async observe(payload, message) {
+  async settleToolCall(payload, message = null, error = null) {
     if (!this.enabled || payload?.method !== 'tools/call') return;
     const name = payload.params?.name;
     const isFlowTool = typeof name === 'string' && name.startsWith(FLOW_TOOL_PREFIX);
-    if (toolResultIsError(message)) {
+    if (error || toolResultIsError(message)) {
       this.validated = false;
       if (
         (TARGET_TOOLS.has(name) || isFlowTool) &&
@@ -675,8 +678,9 @@ export class BrowserWorkspaceRouter {
           const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
           this.updateWindowIdentity(hidden);
           this.remember(this.windowId, this.tabId, this.hwnd, false);
+          this.validated = false;
         } catch {
-          this.logger?.error?.('BMG workspace HWND maintenance failed after tool error.');
+          this.logger?.error?.('BMG workspace HWND maintenance failed after tool failure.');
         }
       }
       return;

@@ -14,8 +14,11 @@
 - Preserve BMG workspace ownership checks. Never hide, show, move, close, or repurpose an Edge window unless its HWND/marker/process ownership has been verified.
 - Workspace recovery must not be suppressed merely because unrelated Edge processes already exist. Recovery may launch a new nonce-marked bootstrap window, but it must not alter unverified Edge windows.
 - While a bootstrap claim is still inside the 30-second startup grace window, recovery must reuse that pending claim instead of overwriting its state or launching another bootstrap window.
+- After the startup grace expires, a pending bootstrap must be explicitly claimed, confirmed absent, or ownership-verified and retired before its state is replaced. Never create another bootstrap merely because the previous state is old, and never retire an entire Edge process to clean up a bootstrap HWND.
 - Page automation is background-first. Only an explicit foreground request may show the BMG workspace.
+- If a tool call temporarily shows the BMG workspace and then fails before a normal result is observed, best-effort true-hide that ownership-verified workspace on the failure path; maintenance failure must not replace the original tool/upstream error.
 - Idle cleanup may only affect tabs in the ownership-verified BMG workspace window; ordinary Edge windows are out of scope.
+- Idle cleanup must not proactively recover or launch Edge when the browser/upstream is offline. Browser recovery remains demand-driven so intentionally closing Edge does not cause a later idle timer to reopen it.
 - Use `node.exe --test tests\sidecar.test.mjs` for the trusted full Node test run under CCM. Also run `git diff --check` before committing.
 - Keep `README.md` synchronized with the current implementation and real validation status. Remove obsolete names and descriptions instead of retaining defensive legacy wording.
 - When the repository has a remote, finish completed implementation work by committing and pushing the intended branch.

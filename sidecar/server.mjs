@@ -652,7 +652,7 @@ async function showWorkspaceWindow(rootDir, hwnd, marker) {
 
 async function ensureWorkspaceBrowser(rootDir, port, startupStateFile) {
   const script = path.join(rootDir, 'scripts', 'ensure-edge.ps1');
-  await execFileAsync(
+  const result = await execFileAsync(
     'powershell.exe',
     [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
@@ -660,6 +660,9 @@ async function ensureWorkspaceBrowser(rootDir, port, startupStateFile) {
     ],
     { cwd: rootDir, windowsHide: true, timeout: 15000 },
   );
+  for (const line of String(result.stdout || '').split(/\r?\n/u)) {
+    if (line.startsWith('BMG bootstrap action=')) console.log(line);
+  }
 }
 
 function sendWorkspaceBootstrap(response, nonce) {
@@ -1156,16 +1159,24 @@ async function handleProtectedMcp(request, response, runtime, url) {
     let forwardedPayload = payload;
     let forwardedBody = body;
     if (payload && payload.method === 'tools/call' && runtime.workspace) {
-      forwardedPayload = await runtime.workspace.rewrite(payload);
+      forwardedPayload = await runtime.workspace.rewrite(payload, { source: 'external-mcp' });
       forwardedBody = JSON.stringify(forwardedPayload);
     }
-    const upstreamResponse = await runtime.upstreamSession.request(
-      request.headers,
-      url,
-      forwardedBody,
-    );
+    let upstreamResponse;
+    try {
+      upstreamResponse = await runtime.upstreamSession.request(
+        request.headers,
+        url,
+        forwardedBody,
+      );
+    } catch (error) {
+      if (runtime.workspace && forwardedPayload?.method === 'tools/call') {
+        await runtime.workspace.settleToolCall(forwardedPayload, null, error);
+      }
+      throw error;
+    }
     if (runtime.workspace && forwardedPayload?.method === 'tools/call') {
-      await runtime.workspace.observe(
+      await runtime.workspace.settleToolCall(
         forwardedPayload,
         parseUpstreamMessage(upstreamResponse.body),
       );
@@ -1204,7 +1215,7 @@ function isAuthorizedLocalControlRequest(request, runtime) {
   );
 }
 
-async function ensureWorkspaceReady(runtime, { revalidate = false } = {}) {
+async function ensureWorkspaceReady(runtime, { revalidate = false, source = 'local-control' } = {}) {
   await runtime.upstreamSession.initializeFromRequest({
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
@@ -1216,7 +1227,7 @@ async function ensureWorkspaceReady(runtime, { revalidate = false } = {}) {
     },
   });
   runtime.workspace.markActivity();
-  return runtime.workspace.ensureWorkspace({ revalidate });
+  return runtime.workspace.ensureWorkspace({ revalidate, context: { source } });
 }
 
 async function callWorkspaceTool(runtime, name, args = {}) {
@@ -1231,21 +1242,31 @@ async function callWorkspaceTool(runtime, name, args = {}) {
     method: 'tools/call',
     params: { name, arguments: args },
   };
-  const forwardedPayload = await runtime.workspace.rewrite(payload);
+  const forwardedPayload = await runtime.workspace.rewrite(payload, { source: 'local-control' });
   const body = JSON.stringify(forwardedPayload);
-  const upstreamResponse = await runtime.upstreamSession.request(
-    { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-    new URL(MCP_PATH, 'http://127.0.0.1'),
-    body,
-  );
+  let upstreamResponse;
+  try {
+    upstreamResponse = await runtime.upstreamSession.request(
+      { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      new URL(MCP_PATH, 'http://127.0.0.1'),
+      body,
+    );
+  } catch (error) {
+    await runtime.workspace.settleToolCall(forwardedPayload, null, error);
+    throw error;
+  }
   if (upstreamResponse.statusCode !== 200) {
-    throw new UpstreamHttpError('Upstream local tool call failed.', upstreamResponse);
+    const error = new UpstreamHttpError('Upstream local tool call failed.', upstreamResponse);
+    await runtime.workspace.settleToolCall(forwardedPayload, null, error);
+    throw error;
   }
   const message = parseUpstreamMessage(upstreamResponse.body);
   if (!message || message.error || !message.result) {
-    throw new Error('Upstream local tool call returned an invalid response.');
+    const error = new Error('Upstream local tool call returned an invalid response.');
+    await runtime.workspace.settleToolCall(forwardedPayload, null, error);
+    throw error;
   }
-  await runtime.workspace.observe(forwardedPayload, message);
+  await runtime.workspace.settleToolCall(forwardedPayload, message);
   return message.result;
 }
 
