@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = 'Nonce')]
+﻿[CmdletBinding(DefaultParameterSetName = 'Nonce')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Nonce')]
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
@@ -65,22 +65,15 @@ $SWP_FRAMECHANGED = 0x0020
 $FLASHW_STOP = 0x00000000
 $WM_CLOSE = 0x0010
 
-function Clear-BmgProcessAttention([uint32]$ProcessId) {
-    [BmgWorkspaceWin32]::EnumWindows({
-        param([IntPtr]$hWnd, [IntPtr]$lParam)
-        [uint32]$windowProcessId = 0
-        [void][BmgWorkspaceWin32]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId)
-        if ($windowProcessId -eq $ProcessId) {
-            $flash = New-Object BmgWorkspaceWin32+FLASHWINFO
-            $flash.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][BmgWorkspaceWin32+FLASHWINFO])
-            $flash.hwnd = $hWnd
-            $flash.dwFlags = $FLASHW_STOP
-            $flash.uCount = 0
-            $flash.dwTimeout = 0
-            [void][BmgWorkspaceWin32]::FlashWindowEx([ref]$flash)
-        }
-        return $true
-    }, [IntPtr]::Zero) | Out-Null
+function Clear-BmgWindowAttention([IntPtr]$Hwnd) {
+    # 只停止已确认归属的工作区闪烁，不干预同一 Edge 进程的用户窗口。
+    $flash = New-Object BmgWorkspaceWin32+FLASHWINFO
+    $flash.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][BmgWorkspaceWin32+FLASHWINFO])
+    $flash.hwnd = $Hwnd
+    $flash.dwFlags = $FLASHW_STOP
+    $flash.uCount = 0
+    $flash.dwTimeout = 0
+    [void][BmgWorkspaceWin32]::FlashWindowEx([ref]$flash)
 }
 
 function Get-BmgWindowInfo([IntPtr]$Hwnd) {
@@ -195,7 +188,22 @@ do {
             Start-Sleep -Milliseconds 80
         }
         $before = Get-BmgWindowInfo $target
-        $oldExStyle = $before.exStyle
+        # 必须先隐藏并等待生效，再改变任务栏样式；反序会留下 Shell 条目。
+        [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
+        do {
+            $hiddenInfo = Get-BmgWindowInfo $target
+            if ($hiddenInfo.marker -ne $WindowMarker -or
+                $hiddenInfo.processId -ne $before.processId -or
+                $hiddenInfo.processStartTimeUtc -ne $before.processStartTimeUtc) {
+                throw "BMG workspace identity changed while hiding."
+            }
+            if (-not $hiddenInfo.visible) { break }
+            Start-Sleep -Milliseconds 20
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($hiddenInfo.visible) {
+            throw "Timed out hiding BMG workspace before changing taskbar style."
+        }
+        $oldExStyle = $hiddenInfo.exStyle
         $newExStyle = ($oldExStyle -band (-bnot $WS_EX_APPWINDOW)) -bor $WS_EX_TOOLWINDOW
         if ($newExStyle -ne $oldExStyle) {
             [void][BmgWorkspaceWin32]::SetWindowLongPtr($target, $GWL_EXSTYLE, [IntPtr]$newExStyle)
@@ -204,8 +212,16 @@ do {
         if (-not [BmgWorkspaceWin32]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0, 0, [uint32]$flags)) {
             throw "SetWindowPos failed while applying BMG workspace window style."
         }
-        [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
-        Clear-BmgProcessAttention ([uint32]$before.processId)
+        # 已隐藏的旧窗口也执行 DeleteTab，修复此前遗留的任务栏预览。
+        $verified = Get-BmgWindowInfo $target
+        if ($verified.marker -ne $WindowMarker -or $verified.visible -or
+            $verified.processId -ne $before.processId -or
+            $verified.processStartTimeUtc -ne $before.processStartTimeUtc) {
+            throw "BMG workspace identity/hidden-state verification failed before taskbar cleanup."
+        }
+        . (Join-Path $PSScriptRoot "workspace-taskbar.ps1")
+        [BmgWorkspaceTaskbar]::Update($target, $false)
+        Clear-BmgWindowAttention $target
         Start-Sleep -Milliseconds 80
         $after = Get-BmgWindowInfo $target
         if ($after.visible -or $after.minimized) {

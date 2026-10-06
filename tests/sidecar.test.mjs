@@ -1806,8 +1806,8 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   const script = readTextFile('scripts/hide-workspace-window.ps1');
   assert.match(script, /FlashWindowEx/u);
   assert.match(script, /FLASHW_STOP/u);
-  assert.match(script, /Clear-BmgProcessAttention \(\[uint32\]\$before\.processId\)/u);
-  assert.match(script, /GetWindowThreadProcessId\(\$hWnd, \[ref\]\$windowProcessId\)/u);
+  assert.match(script, /Clear-BmgWindowAttention \$target/u);
+  assert.doesNotMatch(script, /Clear-BmgProcessAttention/u);
   assert.match(script, /WS_EX_TOOLWINDOW/u);
   assert.match(script, /WS_EX_APPWINDOW/u);
   assert.match(script, /ParameterSetName = 'Hwnd'/u);
@@ -1847,6 +1847,34 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.doesNotMatch(ensureEdge, /taskkill|Stop-Process/iu);
   assert.match(ensureEdge, /hide-workspace-window\.ps1/u);
   assert.match(ensureEdge, /"-Nonce", \$nonce, "-WindowMarker"/u);
+});
+
+test('工作区先确认隐藏再改样式，并仅对归属确认的窗口清理和恢复任务栏', () => {
+  const hide = readTextFile('scripts/hide-workspace-window.ps1');
+  const show = readTextFile('scripts/show-workspace-window.ps1');
+  const helper = readTextFile('scripts/workspace-taskbar.ps1');
+  const ownership = hide.indexOf('} elseif ($info.marker -ne $WindowMarker)');
+  const inspect = hide.indexOf('if ($InspectOnly)');
+  const hideCall = hide.indexOf('::ShowWindowAsync($target, 0)');
+  const hiddenCheck = hide.indexOf('if ($hiddenInfo.visible)');
+  const styleChange = hide.indexOf('::SetWindowLongPtr($target,');
+  const identityCheck = hide.indexOf('if ($verified.marker -ne $WindowMarker');
+  const deleteTab = hide.indexOf('::Update($target, $false)');
+  assert.ok(ownership >= 0 && ownership < inspect && inspect < hideCall);
+  assert.ok(hideCall < hiddenCheck && hiddenCheck < styleChange);
+  assert.ok(styleChange < identityCheck && identityCheck < deleteTab);
+  assert.match(hide, /if \(-not \$hiddenInfo.visible\) \{ break \}/u);
+  assert.match(hide, /\$verified.processId -ne \$before.processId/u);
+  assert.match(hide, /\$verified.processStartTimeUtc -ne \$before.processStartTimeUtc/u);
+  // 重复隐藏也需要清理旧条目，不能只在样式发生变化时执行。
+  assert.match(hide, /if \(\$newExStyle -ne \$oldExStyle\) \{[^}]+\}[^]*::Update\(\$target, \$false\)/u);
+  const showCheck = show.indexOf('if ([int64][BmgWorkspaceShowWin32]::GetProp');
+  const addTab = show.indexOf('::Update($target, $true)');
+  assert.ok(showCheck >= 0 && showCheck < addTab);
+  assert.match(helper, /taskbar.HrInit\(\)/u);
+  assert.match(helper, /show \? taskbar.AddTab\(hwnd\) : taskbar.DeleteTab\(hwnd\)/u);
+  assert.match(helper, /Marshal.ThrowExceptionForHR/u);
+  assert.match(helper, /Marshal.FinalReleaseComObject/u);
 });
 
 test('workspace returns to hidden mode after normal browser work resumes', async (t) => {

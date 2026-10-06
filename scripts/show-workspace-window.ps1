@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [long]$TargetHwnd,
@@ -93,6 +93,10 @@ if ($after.Left -ne $before.Left -or $after.Top -ne $before.Top -or
     $after.Right -ne $before.Right -or $after.Bottom -ne $before.Bottom) {
     throw "BMG workspace show unexpectedly changed window geometry."
 }
+
+# 显式显示后恢复同一工作区的任务栏入口，与隐藏时 DeleteTab 配对。
+. (Join-Path $PSScriptRoot "workspace-taskbar.ps1")
+[BmgWorkspaceTaskbar]::Update($target, $true)
 
 [pscustomobject]@{
     hwnd = [int64]$target
