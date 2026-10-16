@@ -943,7 +943,7 @@ test('Funnel ownership and lifecycle scripts stay narrowly scoped', () => {
 test('configuration rejects reserved ports and keeps the production upstream fixed', () => {
   const defaults = createConfig({ readEnvFile: false, issuer: ISSUER, resource: RESOURCE });
   assert.equal(defaults.port, 18007);
-  assert.equal(defaults.workspaceIdleTimeoutSeconds, 1800);
+  assert.equal(defaults.workspaceIdleTimeoutSeconds, 28800);
   assert.equal(
     createConfig({
       readEnvFile: false,

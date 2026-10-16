@@ -172,7 +172,7 @@ export function createConfig(options = {}) {
   );
   const selectedWorkspaceIdleTimeoutSeconds = requireInteger(
     'BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS',
-    workspaceIdleTimeoutSeconds ?? values.BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS ?? 1800,
+    workspaceIdleTimeoutSeconds ?? values.BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS ?? 28800,
     0,
     604800,
   );
