@@ -6,6 +6,10 @@ Windows gateway around [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrom
 
 This repository wraps the upstream project, adds Microsoft Edge Native Messaging registration on Windows, and exposes it through an independent local OAuth sidecar.
 
+## ChatGPT plugin icon
+
+The ready-to-upload BMG MCP plugin icon is [`assets/bmg-mcp-icon.png`](assets/bmg-mcp-icon.png) (128 x 128 PNG, 9,183 bytes). Upload this file manually when creating or editing the ChatGPT MCP plugin; the icon upload must stay below 10,000 bytes. It is a static local/repository asset, not an image URL or an MCP endpoint, and does not change the BMG server's public tool schemas.
+
 ## BMG OAuth sidecar
 
 当前正式并行架构如下：

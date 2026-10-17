@@ -21,4 +21,5 @@
 - Idle cleanup must not proactively recover or launch Edge when the browser/upstream is offline. Browser recovery remains demand-driven so intentionally closing Edge does not cause a later idle timer to reopen it.
 - Use `node.exe --test tests\sidecar.test.mjs` for the trusted full Node test run under CCM. Also run `git diff --check` before committing.
 - Keep `README.md` synchronized with the current implementation and real validation status. Remove obsolete names and descriptions instead of retaining defensive legacy wording.
+- Keep `assets/bmg-mcp-icon.png` as the manually uploaded BMG ChatGPT MCP plugin icon. Validate that it is a readable square PNG under 10,000 bytes; do not replace manual upload with an image URL or confuse it with another project's icon.
 - When the repository has a remote, finish completed implementation work by committing and pushing the intended branch.
