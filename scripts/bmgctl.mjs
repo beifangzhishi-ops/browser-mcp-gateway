@@ -103,7 +103,12 @@ let toolName = command === 'show'
     ? 'bmg_hide_workspace'
     : null;
 let toolArgs = {};
-if (command === 'call') {
+if (command === 'show') {
+  if (rest.length > 1 || (rest.length === 1 && rest[0] !== '--activate')) {
+    fail('Usage: bmgctl show [--activate]', null, 2);
+  }
+  if (rest[0] === '--activate') toolArgs = { activate: true };
+} else if (command === 'call') {
   toolName = rest[0];
   if (!toolName) fail('Usage: bmgctl call <tool> [--args JSON|--args-base64 BASE64]', null, 2);
   toolArgs = parseToolArguments(rest.slice(1));

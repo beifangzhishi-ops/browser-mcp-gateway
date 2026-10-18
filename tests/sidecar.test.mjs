@@ -116,6 +116,26 @@ test('本机 tool-call 需要本机密钥并通过共享 MCP 会话执行', asyn
     (call) => call.payload?.method === 'tools/call',
   );
   assert.equal(upstreamCall.payload.params.name, 'safe_ping');
+
+  const showRequests = [];
+  fixture.runtime.workspace.showWorkspace = async (options) => {
+    showRequests.push(options);
+    return { visible: true, foreground: options?.activate === true };
+  };
+  for (const [args, foreground] of [[{}, false], [{ activate: true }, true]]) {
+    const shown = await requestJson(fixture.baseUrl, '/internal/tool-call', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-BMG-Local-Secret': APPROVAL_SECRET,
+      },
+      body: JSON.stringify({ name: 'bmg_show_workspace', arguments: args }),
+    });
+    assert.equal(shown.response.status, 200);
+    assert.equal(shown.json.result.visible, true);
+    assert.equal(shown.json.result.foreground, foreground);
+  }
+  assert.deepEqual(showRequests, [{}, { activate: true }]);
 });
 
 test('启动检查初始化共享会话、合并并发请求并重建已关闭工作区', async (t) => {
@@ -1832,6 +1852,11 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(showScript, /WindowMarker/u);
   assert.match(showScript, /GetProp/u);
   assert.match(showScript, /SetForegroundWindow/u);
+  assert.match(showScript, /\[switch\]\$Activate/u);
+  assert.match(showScript, /SWP_NOACTIVATE/u);
+  assert.match(showScript, /if \(-not \$Activate\).*SWP_NOACTIVATE/u);
+  assert.match(showScript, /ShowWindowAsync\(\$target, 4\).*SW_SHOWNOACTIVATE/u);
+  assert.match(showScript, /if \(\$Activate\) \{ \$foreground = .*SetForegroundWindow/u);
   assert.match(showScript, /SWP_NOMOVE/u);
   assert.match(showScript, /SWP_NOSIZE/u);
   assert.match(showScript, /ProcessName -ne 'msedge'/u);
@@ -1888,7 +1913,10 @@ test('workspace returns to hidden mode after normal browser work resumes', async
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     claimWindow: async () => ({ hwnd: 9503 }),
     ensureWindowHidden: async (hwnd) => { transitions.push(['hide', hwnd]); return { hidden: true }; },
-    showWindow: async (hwnd) => { transitions.push(['show', hwnd]); return { foreground: true }; },
+    showWindow: async (hwnd, marker, activate) => {
+      transitions.push(['show', hwnd, activate]);
+      return { foreground: activate };
+    },
     callTool: async (name, args) => {
       if (name === 'chrome_navigate') {
         return workspaceToolMessage({ success: true, windowId: 9501, tabs: [{ tabId: 9502, url: args.url }] });
@@ -1904,22 +1932,28 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   assert.equal(shown.tabId, 9502);
   assert.equal(shown.hwnd, 9503);
   assert.equal(shown.visible, true);
-  assert.equal(shown.foreground, true);
-  assert.deepEqual(transitions, [['show', 9503]]);
+  assert.equal(shown.foreground, false);
+  assert.deepEqual(transitions, [['show', 9503, false]]);
   assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).visible, true);
+
+  const focused = await router.showWorkspace({ activate: true });
+  assert.equal(focused.visible, true);
+  assert.equal(focused.foreground, true);
+  assert.deepEqual(transitions, [['show', 9503, false], ['hide', 9503], ['show', 9503, true]]);
+  await assert.rejects(router.showWorkspace({ activate: 'true' }), /activate must be a boolean/u);
 
   await router.settleToolCall(
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9501, tabId: 9502 }),
   );
-  assert.deepEqual(transitions, [['show', 9503], ['hide', 9503]]);
+  assert.deepEqual(transitions, [['show', 9503, false], ['hide', 9503], ['show', 9503, true], ['hide', 9503]]);
   assert.equal(router.visible, false);
 
   const hidden = await router.hideWorkspace();
   assert.equal(hidden.visible, false);
-  assert.deepEqual(transitions[0], ['show', 9503]);
+  assert.deepEqual(transitions[0], ['show', 9503, false]);
   assert.ok(transitions.length >= 3);
-  assert.ok(transitions.slice(1).every((transition) => transition[0] === 'hide' && transition[1] === 9503));
+  assert.ok(transitions.slice(3).every((transition) => transition[0] === 'hide' && transition[1] === 9503));
   const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   assert.deepEqual(
     { windowId: saved.windowId, tabId: saved.tabId, hwnd: saved.hwnd, visible: saved.visible },
@@ -1932,9 +1966,23 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
     workspaceLocalToolsForTest.map((tool) => tool.name),
     ['bmg_show_workspace', 'bmg_hide_workspace'],
   );
-  for (const tool of workspaceLocalToolsForTest) {
-    assert.deepEqual(tool.inputSchema, { type: 'object', properties: {}, additionalProperties: false });
-  }
+  assert.deepEqual(workspaceLocalToolsForTest[0].inputSchema, {
+    type: 'object',
+    properties: {
+      activate: {
+        type: 'boolean',
+        description: workspaceLocalToolsForTest[0].inputSchema.properties.activate.description,
+        default: false,
+      },
+    },
+    additionalProperties: false,
+  });
+  assert.match(workspaceLocalToolsForTest[0].description, /Showing a window is NOT the same as activating/u);
+  assert.match(workspaceLocalToolsForTest[0].description, /activate=true/u);
+  assert.match(workspaceLocalToolsForTest[0].inputSchema.properties.activate.description, /default/u);
+  assert.deepEqual(workspaceLocalToolsForTest[1].inputSchema, {
+    type: 'object', properties: {}, additionalProperties: false,
+  });
 });
 
 test('flow workspace patch scopes browser APIs and lifts dynamic run options', () => {

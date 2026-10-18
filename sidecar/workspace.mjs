@@ -574,12 +574,13 @@ export class BrowserWorkspaceRouter {
   }
 
 
-  async showWorkspace() {
+  async showWorkspace({ activate = false } = {}) {
     if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
+    if (typeof activate !== 'boolean') throw new TypeError('activate must be a boolean.');
     this.markActivity();
     this.validated = false;
     const workspace = await this.ensureWorkspace();
-    const result = await this.showWindow(workspace.hwnd, this.windowMarker);
+    const result = await this.showWindow(workspace.hwnd, this.windowMarker, activate);
     this.updateWindowIdentity(result);
     this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, true);
     return { ...workspace, visible: true, foreground: result?.foreground === true };
@@ -638,11 +639,11 @@ export class BrowserWorkspaceRouter {
       const backgroundRequested =
         isBackgroundTool && args.background !== false;
       if (foregroundRequested && this.hwnd && this.windowMarker) {
-        const shown = await this.showWindow(this.hwnd, this.windowMarker);
+        const shown = await this.showWindow(this.hwnd, this.windowMarker, true);
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
       } else if (FOREGROUND_TOOLS.has(name) && this.hwnd && this.windowMarker) {
-        const shown = await this.showWindow(this.hwnd, this.windowMarker);
+        const shown = await this.showWindow(this.hwnd, this.windowMarker, true);
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
       } else if (backgroundRequested && this.visible && this.hwnd && this.windowMarker) {

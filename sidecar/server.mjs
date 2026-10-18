@@ -63,13 +63,23 @@ const WORKSPACE_LOCAL_TOOLS = [
   {
     name: 'bmg_show_workspace',
     description:
-      'Bring the dedicated BMG Edge workspace to the foreground for manual login, QR scan, CAPTCHA, or verification. Only the tracked GPT workspace window is affected.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      'Make the dedicated BMG Edge workspace window visible on the desktop and taskbar. Showing a window is NOT the same as activating/focusing it: by default (activate=false) leave the user\'s current foreground window and keyboard focus alone. Only when the user explicitly requests bringing BMG to the front, switching to it, or focusing it, set activate=true. For login, QR scan, CAPTCHA, or manual verification use the requested visibility/focus behavior. Only the ownership-verified BMG window is affected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        activate: {
+          type: 'boolean',
+          description: 'false (default): display BMG without taking foreground focus. true: explicitly request BMG foreground activation. Do not infer true from a request merely to show/display the window.',
+          default: false,
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'bmg_hide_workspace',
     description:
-      'Return the dedicated BMG Edge workspace to true hidden background mode after manual interaction. Only the ownership-verified GPT workspace window is affected.',
+      'Make the dedicated BMG Edge workspace window truly hidden again, including its taskbar entry. This changes visibility, not which other window has keyboard focus. Only the ownership-verified BMG window is affected.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
@@ -633,7 +643,7 @@ async function ensureWorkspaceWindowHidden(rootDir, hwnd, marker) {
   return { ...hidden, hidden: hidden.visible === false };
 }
 
-async function showWorkspaceWindow(rootDir, hwnd, marker) {
+async function showWorkspaceWindow(rootDir, hwnd, marker, activate = false) {
   if (!Number.isInteger(hwnd) || hwnd <= 0) {
     throw new Error('BMG workspace HWND is invalid.');
   }
@@ -644,6 +654,7 @@ async function showWorkspaceWindow(rootDir, hwnd, marker) {
     [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
       '-TargetHwnd', String(hwnd), '-WindowMarker', String(marker),
+      ...(activate ? ['-Activate'] : []),
     ],
     { cwd: rootDir, windowsHide: true, timeout: 10000 },
   );
@@ -843,7 +854,7 @@ async function handleWorkspaceLocalTool(response, payload, runtime) {
   try {
     const result =
       name === 'bmg_show_workspace'
-        ? await runtime.workspace.showWorkspace()
+        ? await runtime.workspace.showWorkspace(payload?.params?.arguments)
         : await runtime.workspace.hideWorkspace();
     sendLocalToolResult(response, payload, { success: true, ...result }, false, runtime.upstreamSession.sessionId);
   } catch (error) {
@@ -1233,7 +1244,7 @@ async function ensureWorkspaceReady(runtime, { revalidate = false, source = 'loc
 async function callWorkspaceTool(runtime, name, args = {}) {
   await ensureWorkspaceReady(runtime);
   if (WORKSPACE_LOCAL_TOOL_NAMES.has(name)) {
-    if (name === 'bmg_show_workspace') return runtime.workspace.showWorkspace();
+    if (name === 'bmg_show_workspace') return runtime.workspace.showWorkspace(args);
     return runtime.workspace.hideWorkspace();
   }
   const payload = {

@@ -4,7 +4,8 @@ param(
     [long]$TargetHwnd,
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 2147483647)]
-    [long]$WindowMarker
+    [long]$WindowMarker,
+    [switch]$Activate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,7 @@ $WS_EX_APPWINDOW = [int64]0x00040000
 $SWP_NOSIZE = 0x0001
 $SWP_NOMOVE = 0x0002
 $SWP_NOZORDER = 0x0004
+$SWP_NOACTIVATE = 0x0010
 $SWP_FRAMECHANGED = 0x0020
 $SWP_SHOWWINDOW = 0x0040
 $target = [IntPtr]$TargetHwnd
@@ -66,15 +68,19 @@ if ($newExStyle -ne $oldExStyle) {
     [void][BmgWorkspaceShowWin32]::SetWindowLongPtr($target, $GWL_EXSTYLE, [IntPtr]$newExStyle)
 }
 $flags = $SWP_NOSIZE -bor $SWP_NOMOVE -bor $SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_SHOWWINDOW
+if (-not $Activate) { $flags = $flags -bor $SWP_NOACTIVATE }
 if (-not [BmgWorkspaceShowWin32]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0, 0, [uint32]$flags)) {
     throw "SetWindowPos failed while showing the BMG workspace window."
 }
-if ([BmgWorkspaceShowWin32]::IsIconic($target)) {
+if (-not $Activate) {
+    [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 4) # SW_SHOWNOACTIVATE
+} elseif ([BmgWorkspaceShowWin32]::IsIconic($target)) {
     [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 9) # SW_RESTORE
 } else {
     [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 5) # SW_SHOW
 }
-$foreground = [BmgWorkspaceShowWin32]::SetForegroundWindow($target)
+$foreground = $false
+if ($Activate) { $foreground = [BmgWorkspaceShowWin32]::SetForegroundWindow($target) }
 Start-Sleep -Milliseconds 80
 
 $after = New-Object BmgWorkspaceShowWin32+RECT

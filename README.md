@@ -294,9 +294,19 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
+### 窗口显示与前台激活
+
+这两种操作不同，BMG 的 MCP 工具也明确区分：
+
+- **显示窗口**：调用 `bmg_show_workspace`，不传参数或传 `{"activate":false}`。使 BMG 工作区在桌面及任务栏可见，但不主动抢占当前前台窗口或键盘焦点。适用于“显示窗口”“让我看到窗口”。
+- **弹到前台**：调用 `bmg_show_workspace` 并传 `{"activate":true}`。显示 BMG 工作区并向 Windows 请求激活，让它成为当前操作窗口。适用于“弹到前台”“切换到 BMG”“聚焦工作区”。Windows 仍可能限制跨进程前台激活；结果中的 `foreground` 表示该请求的执行结果。
+- **真正隐藏**：调用 `bmg_hide_workspace`，关闭 BMG 窗口的可见性及任务栏入口，不关闭浏览器工作区。
+
+本机控制命令对应 `bmgctl show`（只显示）和 `bmgctl show --activate`（请求前台）。页面自动化默认保持后台；显式传入 `background:false` 的页面工具及人工选取元素操作会请求前台。以上操作只针对归属已验证的 BMG 工作区窗口。
+
 在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，`chrome_close_tabs` 也会被收窄到工作区标签页，避免默认选中普通前台 Edge 窗口。页面工具的 `background` 语义为后台优先：调用方未指定时按 `true` 处理，不激活标签页或聚焦窗口；只有显式传入 `background:false` 才会显示并保持该工作区可见。URL 导航在返回成功前会等待目标 URL（或实际重定向 URL）进入稳定完成状态，避免紧接着的 DOM 调用打到旧页面。
 
-正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明正式 workspace 归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸；显式调用 `bmg_show_workspace`，或对支持后台参数的页面工具显式传入 `background:false`，才允许前台激活。工具调用如果在临时显示后因 upstream transport 错误失败，sidecar 也会 best-effort 把 ownership-verified workspace 恢复为 true-hidden，避免留下可见任务栏项；隐藏维护失败不会覆盖原始浏览器错误或成功结果。
+正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明正式 workspace 归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸；显式调用 `bmg_show_workspace` 默认只显示窗口，不主动抢占焦点；指定 `activate:true`，或对支持后台参数的页面工具显式传入 `background:false`，才会请求前台激活。工具调用如果在临时显示后因 upstream transport 错误失败，sidecar 也会 best-effort 把 ownership-verified workspace 恢复为 true-hidden，避免留下可见任务栏项；隐藏维护失败不会覆盖原始浏览器错误或成功结果。
 
 2026-10-07 修复任务栏残留：隐藏流程先执行 `SW_HIDE` 并等待窗口不可见，再移除 `WS_EX_APPWINDOW`、设置 `WS_EX_TOOLWINDOW`，最后通过 `ITaskbarList::DeleteTab` 清理同一归属已验证 HWND 的任务栏条目；重复隐藏也会执行清理。显式显示完成后通过 `AddTab` 恢复任务栏入口。COM 初始化或任务栏操作失败会使 helper 报错，不能仅凭 `visible=false` 宣称任务栏验收通过。该流程继续保持窗口位置和尺寸，并在清理前复核 marker、PID 和进程启动时间。顺序依据：[微软关于任务栏残留的说明](https://devblogs.microsoft.com/oldnewthing/20031229-00/?p=41283)。停止闪烁也仅作用于已确认的工作区 HWND，不再遍历同一 Edge 进程的其他窗口。
 
