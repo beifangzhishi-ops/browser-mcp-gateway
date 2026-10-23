@@ -294,6 +294,8 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
+Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's current size, position, and maximized state without taking focus. The display helper does not resize the window or change its saved normal bounds. The minimized-window preparation inside the hide helper is separate. Validation: automated tests cover the exact Win32 flag; a real desktop maximize/show/hide cycle has not yet been retested after this change (2026-10-23).
+
 ### 窗口显示与前台激活
 
 这两种操作不同，BMG 的 MCP 工具也明确区分：

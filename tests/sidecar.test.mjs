@@ -1855,7 +1855,8 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(showScript, /\[switch\]\$Activate/u);
   assert.match(showScript, /SWP_NOACTIVATE/u);
   assert.match(showScript, /if \(-not \$Activate\).*SWP_NOACTIVATE/u);
-  assert.match(showScript, /ShowWindowAsync\(\$target, 4\).*SW_SHOWNOACTIVATE/u);
+  assert.match(showScript, /ShowWindowAsync\(\$target, 8\).*SW_SHOWNA/u);
+  assert.doesNotMatch(showScript, /ShowWindowAsync\(\$target, 4\)/u);
   assert.match(showScript, /if \(\$Activate\) \{ \$foreground = .*SetForegroundWindow/u);
   assert.match(showScript, /SWP_NOMOVE/u);
   assert.match(showScript, /SWP_NOSIZE/u);

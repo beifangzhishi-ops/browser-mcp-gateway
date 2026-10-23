@@ -73,7 +73,7 @@ if (-not [BmgWorkspaceShowWin32]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0,
     throw "SetWindowPos failed while showing the BMG workspace window."
 }
 if (-not $Activate) {
-    [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 4) # SW_SHOWNOACTIVATE
+    [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 8) # SW_SHOWNA: preserve current window state and geometry
 } elseif ([BmgWorkspaceShowWin32]::IsIconic($target)) {
     [void][BmgWorkspaceShowWin32]::ShowWindowAsync($target, 9) # SW_RESTORE
 } else {
