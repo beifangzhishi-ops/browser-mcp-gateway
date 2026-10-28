@@ -294,6 +294,14 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
+### Window transition diagnostics (2026-10-28)
+
+The sidecar appends one JSON object per event to `logs/bmg-window-transitions.jsonl`, retaining the history across service restarts. Explicit `bmg_show_workspace` and `bmg_hide_workspace` calls emit `command` and `command-result`; the underlying ownership-verified window helper emits paired `request` / `result` entries for explicit calls and automatic operations. `reason` distinguishes `explicit-show`, `explicit-hide`, `revalidate`, `page-foreground`, `page-background`, `page-settle`, `page-error`, `element-picker`, and `idle-cleanup`. `sequence` correlates one helper request and result within a single sidecar process.
+
+Results distinguish Win32 `visible` / `minimized` / `appWindow` / `toolWindow` from `taskbarApi` (`AddTab` or `DeleteTab`) and `taskbarApiSucceeded`. `taskbarUiStatus: not_verified` is intentional: Windows COM success does not independently establish that Explorer's taskbar UI removed its entry. Logs contain no URLs, page titles, OAuth secrets, or ownership marker. The trace is diagnostic, not a guarantee of taskbar UI state. The log is local and ignored by Git; inspecting it does not require showing the workspace.
+
+The 2026-10-28 change also forwards the explicit `activate` value from the sidecar to the Win32 show helper. The MCP tool names and schemas are unchanged, so no ChatGPT plugin rebuild is required.
+
 Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's current size, position, and maximized state without taking focus. The display helper does not resize the window or change its saved normal bounds. The minimized-window preparation inside the hide helper is separate. Validation: automated tests cover the exact Win32 flag; a real desktop maximize/show/hide cycle has not yet been retested after this change (2026-10-23).
 
 ### 窗口显示与前台激活

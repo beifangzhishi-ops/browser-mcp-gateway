@@ -171,16 +171,20 @@ export class BrowserWorkspaceRouter {
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     logger = console,
+    onWindowTransition = null,
   } = {}) {
     this.enabled = enabled === true;
     this.stateFile = stateFile;
     this.startupStateFile = startupStateFile;
     this.callTool = callTool;
     this.bootstrapUrl = bootstrapUrl;
-    this.claimWindow = claimWindow;
+    this.claimWindow = (nonce, marker) =>
+      this.transitionWindow('hide', 'bootstrap-claim', null, false, () => claimWindow(nonce, marker));
     this.inspectWindow = inspectWindow;
-    this.ensureWindowHidden = ensureWindowHidden;
-    this.showWindow = showWindow;
+    this.ensureWindowHidden = (hwnd, marker, reason = 'maintenance') =>
+      this.transitionWindow('hide', reason, hwnd, false, () => ensureWindowHidden(hwnd, marker));
+    this.showWindow = (hwnd, marker, activate = false, reason = 'maintenance') =>
+      this.transitionWindow('show', reason, hwnd, activate, () => showWindow(hwnd, marker, activate));
     this.recoverBrowser = typeof recoverBrowser === 'function' ? recoverBrowser : null;
     this.recoveryDelaysMs = Array.isArray(recoveryDelaysMs)
       ? recoveryDelaysMs.map(Number).filter((delay) => Number.isFinite(delay) && delay >= 0)
@@ -191,6 +195,8 @@ export class BrowserWorkspaceRouter {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.logger = logger;
+    this.onWindowTransition = onWindowTransition;
+    this.windowTransitionSequence = 0;
     if (!Number.isFinite(this.idleTimeoutMs) || this.idleTimeoutMs < 0) {
       throw new Error('BMG workspace idle timeout must be a non-negative number.');
     }
@@ -209,6 +215,44 @@ export class BrowserWorkspaceRouter {
     this.validated = false;
     this.initializing = null;
     if (this.windowId && this.tabId) this.scheduleIdleCleanup();
+  }
+
+  recordWindowTransition(event) {
+    const record = { at: new Date(this.clock()).toISOString(), ...event };
+    try {
+      this.onWindowTransition?.(record);
+    } catch (error) {
+      this.logger?.error?.('BMG window transition logging failed: ' + String(error?.message || error));
+    }
+  }
+
+  async transitionWindow(action, reason, hwnd, activate, operation) {
+    const sequence = ++this.windowTransitionSequence;
+    const common = { sequence, action, reason, hwnd, windowId: this.windowId, activate };
+    this.recordWindowTransition({ ...common, phase: 'request' });
+    try {
+      const result = await operation();
+      this.recordWindowTransition({
+        ...common,
+        hwnd: result?.hwnd ?? hwnd,
+        phase: 'result',
+        outcome: 'success',
+        win32Visible: typeof result?.visible === 'boolean' ? result.visible : null,
+        win32Minimized: typeof result?.minimized === 'boolean' ? result.minimized : null,
+        win32AppWindow: typeof result?.appWindow === 'boolean' ? result.appWindow : null,
+        win32ToolWindow: typeof result?.toolWindow === 'boolean' ? result.toolWindow : null,
+        taskbarApi: result?.taskbarApi ?? null,
+        taskbarApiSucceeded: result?.taskbarApiSucceeded === true ? true : null,
+        taskbarUiStatus: 'not_verified',
+      });
+      return result;
+    } catch (error) {
+      this.recordWindowTransition({
+        ...common, phase: 'result', outcome: 'error',
+        error: String(error?.message || error),
+      });
+      throw error;
+    }
   }
 
   clearIdleTimer() {
@@ -323,7 +367,7 @@ export class BrowserWorkspaceRouter {
     if (this.hwnd && this.windowMarker) {
       let hidden;
       try {
-        hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'idle-cleanup');
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         throw new Error(`rehide-workspace: ${detail}`);
@@ -413,7 +457,7 @@ export class BrowserWorkspaceRouter {
       this.updateWindowIdentity(info);
       let visible = this.visible === true && info?.visible === true;
       if (!visible) {
-        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'revalidate');
         this.updateWindowIdentity(hidden);
         visible = false;
       }
@@ -575,26 +619,46 @@ export class BrowserWorkspaceRouter {
 
 
   async showWorkspace({ activate = false } = {}) {
-    if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
-    if (typeof activate !== 'boolean') throw new TypeError('activate must be a boolean.');
-    this.markActivity();
-    this.validated = false;
-    const workspace = await this.ensureWorkspace();
-    const result = await this.showWindow(workspace.hwnd, this.windowMarker, activate);
-    this.updateWindowIdentity(result);
-    this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, true);
-    return { ...workspace, visible: true, foreground: result?.foreground === true };
+    this.recordWindowTransition({ phase: 'command', action: 'show', reason: 'explicit-show', activate });
+    try {
+      if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
+      if (typeof activate !== 'boolean') throw new TypeError('activate must be a boolean.');
+      this.markActivity();
+      this.validated = false;
+      const workspace = await this.ensureWorkspace();
+      const result = await this.showWindow(workspace.hwnd, this.windowMarker, activate, 'explicit-show');
+      this.updateWindowIdentity(result);
+      this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, true);
+      this.recordWindowTransition({ phase: 'command-result', action: 'show', outcome: 'success' });
+      return { ...workspace, visible: true, foreground: result?.foreground === true };
+    } catch (error) {
+      this.recordWindowTransition({
+        phase: 'command-result', action: 'show', outcome: 'error',
+        error: String(error?.message || error),
+      });
+      throw error;
+    }
   }
 
   async hideWorkspace() {
-    if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
-    this.markActivity();
-    this.validated = false;
-    const workspace = await this.ensureWorkspace();
-    const result = await this.ensureWindowHidden(workspace.hwnd, this.windowMarker);
-    this.updateWindowIdentity(result);
-    this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, false);
-    return { ...workspace, visible: false, hidden: result?.hidden !== false };
+    this.recordWindowTransition({ phase: 'command', action: 'hide', reason: 'explicit-hide' });
+    try {
+      if (!this.enabled) throw new Error('BMG workspace mode is disabled.');
+      this.markActivity();
+      this.validated = false;
+      const workspace = await this.ensureWorkspace();
+      const result = await this.ensureWindowHidden(workspace.hwnd, this.windowMarker, 'explicit-hide');
+      this.updateWindowIdentity(result);
+      this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, false);
+      this.recordWindowTransition({ phase: 'command-result', action: 'hide', outcome: 'success' });
+      return { ...workspace, visible: false, hidden: result?.hidden !== false };
+    } catch (error) {
+      this.recordWindowTransition({
+        phase: 'command-result', action: 'hide', outcome: 'error',
+        error: String(error?.message || error),
+      });
+      throw error;
+    }
   }
 
   async close() {
@@ -639,15 +703,15 @@ export class BrowserWorkspaceRouter {
       const backgroundRequested =
         isBackgroundTool && args.background !== false;
       if (foregroundRequested && this.hwnd && this.windowMarker) {
-        const shown = await this.showWindow(this.hwnd, this.windowMarker, true);
+        const shown = await this.showWindow(this.hwnd, this.windowMarker, true, 'page-foreground');
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
       } else if (FOREGROUND_TOOLS.has(name) && this.hwnd && this.windowMarker) {
-        const shown = await this.showWindow(this.hwnd, this.windowMarker, true);
+        const shown = await this.showWindow(this.hwnd, this.windowMarker, true, 'element-picker');
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
       } else if (backgroundRequested && this.visible && this.hwnd && this.windowMarker) {
-        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'page-background');
         this.updateWindowIdentity(hidden);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, false);
       }
@@ -676,7 +740,7 @@ export class BrowserWorkspaceRouter {
         this.windowMarker
       ) {
         try {
-          const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+          const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'page-error');
           this.updateWindowIdentity(hidden);
           this.remember(this.windowId, this.tabId, this.hwnd, false);
           this.validated = false;
@@ -712,7 +776,7 @@ export class BrowserWorkspaceRouter {
         return;
       }
       try {
-        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker);
+        const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'page-settle');
         this.updateWindowIdentity(hidden);
         this.remember(this.windowId, this.tabId, this.hwnd, false);
         if (isFlowTool) this.validated = false;

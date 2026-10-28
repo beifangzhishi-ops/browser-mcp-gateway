@@ -1844,6 +1844,8 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(script, /ProcessName -ne 'msedge'/u);
   assert.match(script, /ownership marker mismatch/u);
   assert.match(script, /hide unexpectedly changed window geometry/u);
+  assert.match(script, /NotePropertyName taskbarApi -NotePropertyValue 'DeleteTab'/u);
+  assert.match(script, /NotePropertyName taskbarApiSucceeded -NotePropertyValue \$true/u);
   assert.doesNotMatch(script, /-32000/u);
   assert.doesNotMatch(script, /taskkill|Stop-Process|ProcessName -eq 'msedge'.*Stop/isu);
 
@@ -1862,6 +1864,8 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(showScript, /SWP_NOSIZE/u);
   assert.match(showScript, /ProcessName -ne 'msedge'/u);
   assert.match(showScript, /show unexpectedly changed window geometry/u);
+  assert.match(showScript, /taskbarApi = 'AddTab'/u);
+  assert.match(showScript, /taskbarApiSucceeded = \$true/u);
   assert.doesNotMatch(showScript, /GetSystemMetrics|-32000/u);
   assert.doesNotMatch(showScript, /taskkill|Stop-Process/iu);
 
@@ -1873,6 +1877,49 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.doesNotMatch(ensureEdge, /taskkill|Stop-Process/iu);
   assert.match(ensureEdge, /hide-workspace-window\.ps1/u);
   assert.match(ensureEdge, /"-Nonce", \$nonce, "-WindowMarker"/u);
+});
+
+test('workspace transitions record command intent, Win32 results, taskbar API and failures', async () => {
+  const events = [];
+  const router = new BrowserWorkspaceRouter({
+    clock: () => Date.parse('2026-10-28T08:00:00.000Z'),
+    onWindowTransition: (event) => events.push(event),
+    logger: { log() {}, error() {} },
+  });
+  const result = await router.transitionWindow('hide', 'explicit-hide', 12345, false, async () => ({
+    visible: false, minimized: false, appWindow: false, toolWindow: true,
+    taskbarApi: 'DeleteTab', taskbarApiSucceeded: true,
+  }));
+  assert.equal(result.visible, false);
+  assert.deepEqual(events.map((event) => event.phase), ['request', 'result']);
+  assert.equal(events[0].reason, 'explicit-hide');
+  assert.equal(events[1].at, '2026-10-28T08:00:00.000Z');
+  assert.equal(events[1].outcome, 'success');
+  assert.equal(events[1].win32Visible, false);
+  assert.equal(events[1].win32ToolWindow, true);
+  assert.equal(events[1].taskbarApi, 'DeleteTab');
+  assert.equal(events[1].taskbarApiSucceeded, true);
+  assert.equal(events[1].taskbarUiStatus, 'not_verified');
+  await assert.rejects(() => router.transitionWindow('show', 'page-foreground', 12345, true, async () => {
+    throw new Error('synthetic window failure');
+  }), /synthetic window failure/u);
+  assert.deepEqual(events.slice(2).map((event) => event.phase), ['request', 'result']);
+  assert.equal(events[3].outcome, 'error');
+  assert.equal(events[3].activate, true);
+  assert.equal(events[3].error, 'synthetic window failure');
+  const errors = [];
+  const logFailureRouter = new BrowserWorkspaceRouter({
+    onWindowTransition: () => { throw new Error('disk unavailable'); },
+    logger: { error: (message) => errors.push(message) },
+  });
+  await assert.doesNotReject(() => logFailureRouter.transitionWindow(
+    'hide', 'test', 12345, false, async () => ({ visible: false }),
+  ));
+  assert.equal(errors.length, 2);
+  assert.match(
+    readTextFile('sidecar/server.mjs'),
+    /showWindow: \(hwnd, marker, activate\) => showWorkspaceWindow\(config.rootDir, hwnd, marker, activate\)/u,
+  );
 });
 
 test('工作区先确认隐藏再改样式，并仅对归属确认的窗口清理和恢复任务栏', () => {
@@ -1908,9 +1955,11 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
   const transitions = [];
+  const visibilityEvents = [];
   const router = new BrowserWorkspaceRouter({
     enabled: true,
     stateFile,
+    onWindowTransition: (event) => visibilityEvents.push(event),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     claimWindow: async () => ({ hwnd: 9503 }),
     ensureWindowHidden: async (hwnd) => { transitions.push(['hide', hwnd]); return { hidden: true }; },
@@ -1952,6 +2001,11 @@ test('workspace returns to hidden mode after normal browser work resumes', async
 
   const hidden = await router.hideWorkspace();
   assert.equal(hidden.visible, false);
+  assert.ok(visibilityEvents.some((event) => event.phase === 'command' && event.reason === 'explicit-hide'));
+  assert.ok(visibilityEvents.some((event) => event.phase === 'command-result' && event.action === 'hide' && event.outcome === 'success'));
+  assert.ok(visibilityEvents.some((event) => event.phase === 'command' && event.reason === 'explicit-show' && event.activate === true));
+  assert.ok(visibilityEvents.some((event) => event.phase === 'request' && event.reason === 'page-settle'));
+  assert.ok(visibilityEvents.some((event) => event.phase === 'result' && event.reason === 'explicit-hide'));
   assert.deepEqual(transitions[0], ['show', 9503, false]);
   assert.ok(transitions.length >= 3);
   assert.ok(transitions.slice(3).every((transition) => transition[0] === 'hide' && transition[1] === 9503));

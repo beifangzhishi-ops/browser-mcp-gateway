@@ -234,6 +234,8 @@ do {
             $after.right -ne $before.right -or $after.bottom -ne $before.bottom) {
             throw "BMG workspace hide unexpectedly changed window geometry."
         }
+        $after | Add-Member -NotePropertyName taskbarApi -NotePropertyValue 'DeleteTab'
+        $after | Add-Member -NotePropertyName taskbarApiSucceeded -NotePropertyValue $true
         $after | ConvertTo-Json -Compress
         exit 0
     }

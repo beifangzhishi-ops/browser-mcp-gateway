@@ -118,4 +118,6 @@ if ($after.Left -ne $before.Left -or $after.Top -ne $before.Top -or
     marker = $WindowMarker
     appWindow = $true
     toolWindow = $false
+    taskbarApi = 'AddTab'
+    taskbarApiSucceeded = $true
 } | ConvertTo-Json -Compress

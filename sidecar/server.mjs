@@ -1442,12 +1442,17 @@ export function createBmgServer(options = {}) {
     startupStateFile: path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
     idleTimeoutMs: config.workspaceIdleTimeoutSeconds * 1000,
     logger,
+    onWindowTransition: (event) => fs.appendFileSync(
+      path.join(config.logDir, 'bmg-window-transitions.jsonl'),
+      JSON.stringify(event) + '\n',
+      { encoding: 'utf8', mode: 0o600 },
+    ),
     bootstrapUrl: `http://127.0.0.1:${config.port}${WORKSPACE_BOOTSTRAP_PATH}`,
     claimWindow: (nonce, marker) => claimWorkspaceWindow(config.rootDir, nonce, marker),
     inspectWindow: (hwnd, marker) => inspectWorkspaceWindow(config.rootDir, hwnd, marker),
     ensureWindowHidden: (hwnd, marker) =>
       ensureWorkspaceWindowHidden(config.rootDir, hwnd, marker),
-    showWindow: (hwnd, marker) => showWorkspaceWindow(config.rootDir, hwnd, marker),
+    showWindow: (hwnd, marker, activate) => showWorkspaceWindow(config.rootDir, hwnd, marker, activate),
     recoverBrowser: options.workspaceRecoverBrowser === undefined
       ? () => ensureWorkspaceBrowser(
           config.rootDir,
