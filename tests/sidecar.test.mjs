@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHash, randomBytes } from 'node:crypto';
-import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest } from '../sidecar/server.mjs';
+import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, augmentWorkspaceToolsForTest } from '../sidecar/server.mjs';
 import { createConfig } from '../sidecar/config.mjs';
 import { BrowserWorkspaceRouter } from '../sidecar/workspace.mjs';
 import { prepareWorkspace } from '../scripts/ensure-workspace.mjs';
@@ -2038,6 +2038,37 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
   assert.deepEqual(workspaceLocalToolsForTest[1].inputSchema, {
     type: 'object', properties: {}, additionalProperties: false,
   });
+});
+
+test('workspace tool list adds login guidance only to chrome_read_page', () => {
+  const sourceTools = [
+    { name: 'chrome_read_page', description: 'Read visible page elements', inputSchema: { type: 'object', properties: {} } },
+    { name: 'chrome_computer', description: 'Interact with page', inputSchema: { type: 'object', properties: {} } },
+    { name: 'flow.sign-in', description: 'Recorded flow', inputSchema: { type: 'object', properties: {} } },
+  ];
+  const response = {
+    statusCode: 200,
+    headers: { 'content-length': 'old-length', 'content-type': 'text/event-stream' },
+    body: Buffer.from('event: message\ndata: ' + JSON.stringify({
+      jsonrpc: '2.0', id: 1, result: { tools: sourceTools },
+    }) + '\n\n', 'utf8'),
+  };
+  assert.equal(augmentWorkspaceToolsForTest(response, false), response);
+  const augmented = augmentWorkspaceToolsForTest(response, true);
+  const tools = parseSse(augmented.body.toString('utf8')).result.tools;
+  assert.deepEqual(tools.map((tool) => tool.name), [
+    'chrome_read_page', 'chrome_computer', 'flow.sign-in', 'bmg_show_workspace', 'bmg_hide_workspace',
+  ]);
+  assert.ok(tools[0].description.startsWith(sourceTools[0].description + '\n'));
+  assert.match(tools[0].description, /优先使用验证码登录/u);
+  assert.match(tools[0].description, /CCM/u);
+  assert.match(tools[0].description, /savePng=true/u);
+  assert.match(tools[0].description, /填写并点击发送/u);
+  assert.deepEqual(tools[0].inputSchema, sourceTools[0].inputSchema);
+  assert.deepEqual(tools.slice(1, 3), sourceTools.slice(1));
+  assert.deepEqual(sourceTools[0].description, 'Read visible page elements');
+  assert.equal(augmented.headers['content-length'], undefined);
+  assert.equal(augmentWorkspaceToolsForTest({ ...response, statusCode: 502 }, true).statusCode, 502);
 });
 
 test('flow workspace patch scopes browser APIs and lifts dynamic run options', () => {

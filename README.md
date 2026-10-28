@@ -136,6 +136,8 @@ The source checkout is kept under ignored `upstream/mcp-chrome/` for inspection 
 
 The pinned bridge tracks the current upstream npm release used by this repository. BMG exposes the full `chrome-mcp-shared@1.0.2` public catalog plus dynamic `flow.<slug>` tools from the bridge. Workspace safety is enforced below the schema layer, so BMG can follow upstream tool additions without duplicating their public definitions.
 
+In workspace mode, BMG appends a short login guide only to the public `chrome_read_page` tool description in MCP `tools/list`. It directs the model to prefer verification-code login, ask the user for SMS codes after filling the phone number and requesting the code itself, and share graphical CAPTCHAs for user recognition. For CAPTCHA sharing with CCM, capture the relevant image using `chrome_screenshot` with `savePng=true` and `storeBase64=false`, then publish the saved image using CCM's `publish_worker_file`. All other upstream tool descriptions and input schemas remain unchanged. This is model guidance, not an automatic login or image-sharing service; it requires both BMG and CCM to be available. Because the public tool description changes, refresh/rebuild the ChatGPT plugin/app tool schema after deploying the sidecar update.
+
 ## Requirements
 
 - Windows 10/11

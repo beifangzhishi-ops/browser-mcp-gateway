@@ -6,6 +6,7 @@
 - Rebuild the extension through `scripts/setup.ps1`; it verifies the pinned upstream archive SHA256 before applying BMG patches.
 - Keep navigation behavior in `scripts/patch-extension-navigation.mjs`, content fallbacks in `scripts/patch-extension-web-content.mjs` / `scripts/patch-extension-content-cdp.mjs`, and do not duplicate responsibilities across patchers.
 - Keep upstream public-tool targeting and record/replay workspace isolation in `scripts/patch-extension-upstream-tools.mjs`. BMG should expose the complete public tool catalog of the pinned `chrome-mcp-shared` version plus dynamic `flow.<slug>` tools; do not maintain duplicate upstream tool schemas in the sidecar.
+- Append BMG-specific model guidance only to the relevant upstream tool description in `augmentWorkspaceTools`; preserve upstream names, input schemas, and descriptions for unrelated tools.
 - Upstream tools that use active/currentWindow semantics must be converted to explicit BMG tab/window targeting before they are reachable through the public BMG endpoint. Dynamic flow tab/window creation, switching, lookup, and closing must stay inside the ownership-verified BMG workspace window.
 - Browser automation from local external consumers must go through `bmgctl`; do not read the approval secret or call private `/internal/*` endpoints directly.
 - Treat any change to MCP `tools/list`, public tool names, tool descriptions, or input schemas as a ChatGPT plugin/app rebuild event. Restarting the BMG sidecar alone is not sufficient because ChatGPT may retain the previously built tool schema.

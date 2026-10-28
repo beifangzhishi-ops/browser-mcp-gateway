@@ -87,6 +87,8 @@ const WORKSPACE_ADDITIONAL_TOOLS = [
   ...WORKSPACE_LOCAL_TOOLS,
 ];
 const WORKSPACE_LOCAL_TOOL_NAMES = new Set(WORKSPACE_LOCAL_TOOLS.map((tool) => tool.name));
+const READ_PAGE_LOGIN_GUIDANCE =
+  '遇到登录页面时优先使用验证码登录。图形验证码通过 BMG 截图保存图片（savePng=true、storeBase64=false），由 CCM 发布给用户识别；短信验证码先向用户获取手机号，由模型填写并点击发送，再向用户索取收到的验证码并填写登录。模型自行完成其余可执行的操作，登录后继续原任务。';
 
 function logMessage(logger, method, message) {
   if (logger && typeof logger[method] === 'function') {
@@ -819,7 +821,9 @@ function augmentWorkspaceTools(upstreamResponse, enabled) {
   if (!Array.isArray(message?.result?.tools)) return upstreamResponse;
   const existing = new Set(message.result.tools.map((tool) => tool?.name));
   message.result.tools = [
-    ...message.result.tools,
+    ...message.result.tools.map((tool) => tool?.name === 'chrome_read_page'
+      ? { ...tool, description: `${tool.description}\n${READ_PAGE_LOGIN_GUIDANCE}` }
+      : tool),
     ...WORKSPACE_ADDITIONAL_TOOLS.filter((tool) => !existing.has(tool.name)),
   ];
   const headers = { ...(upstreamResponse.headers || {}) };
@@ -1544,3 +1548,4 @@ if (currentFile === invokedFile) {
 }
 
 export const workspaceLocalToolsForTest = WORKSPACE_LOCAL_TOOLS;
+export const augmentWorkspaceToolsForTest = augmentWorkspaceTools;
