@@ -302,6 +302,8 @@ Results distinguish Win32 `visible` / `minimized` / `appWindow` / `toolWindow` f
 
 The 2026-10-28 change also forwards the explicit `activate` value from the sidecar to the Win32 show helper. The MCP tool names and schemas are unchanged, so no ChatGPT plugin rebuild is required.
 
+Live desktop check (2026-10-28, Windows on 6v): two cycles of non-activating `bmgctl show` followed by `bmgctl hide` succeeded against the same owned HWND `1316646`; each show returned `visible=true`, each hide returned `visible=false`, and the foreground did not transfer to BMG. Ownership marker, non-minimized state and the expected Win32 window styles remained correct. A final repeated hide also succeeded, leaving the workspace hidden. The diagnostic log recorded successful `AddTab` / `DeleteTab` COM returns. Explorer's rendered taskbar entries were **not** independently verified, so this test does not establish that a visual taskbar residue cannot recur.
+
 Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's current size, position, and maximized state without taking focus. The display helper does not resize the window or change its saved normal bounds. The minimized-window preparation inside the hide helper is separate. Validation: automated tests cover the exact Win32 flag; a real desktop maximize/show/hide cycle has not yet been retested after this change (2026-10-23).
 
 ### 窗口显示与前台激活
