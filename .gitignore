@@ -4,6 +4,7 @@ extension/
 logs/
 .state/
 config/.env
+config/approval-policy.json
 *.log
 *.tmp
 .DS_Store

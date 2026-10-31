@@ -7,6 +7,14 @@ import { promisify } from 'node:util';
 import { loadConfig } from './config.mjs';
 import { BrowserWorkspaceRouter } from './workspace.mjs';
 import {
+  BmgApprovalGate,
+  addApprovalToTools,
+  approvalUiResource,
+  isApprovalTool,
+  isApprovalUiResource,
+} from './approval/index.mjs';
+import { APPROVAL_UI_HTML } from './approval/approval-app.mjs';
+import {
   OAuthError,
   OAuthStore,
   OAUTH_SCOPE,
@@ -816,22 +824,120 @@ function parseUpstreamMessage(body) {
 }
 
 function augmentWorkspaceTools(upstreamResponse, enabled) {
-  if (!enabled || upstreamResponse.statusCode !== 200) return upstreamResponse;
+  if (upstreamResponse.statusCode !== 200) return upstreamResponse;
   const message = parseUpstreamMessage(upstreamResponse.body);
   if (!Array.isArray(message?.result?.tools)) return upstreamResponse;
   const existing = new Set(message.result.tools.map((tool) => tool?.name));
   message.result.tools = [
-    ...message.result.tools.map((tool) => tool?.name === 'chrome_read_page'
+    ...message.result.tools.map((tool) => enabled && tool?.name === 'chrome_read_page'
       ? { ...tool, description: `${tool.description}\n${READ_PAGE_LOGIN_GUIDANCE}` }
       : tool),
-    ...WORKSPACE_ADDITIONAL_TOOLS.filter((tool) => !existing.has(tool.name)),
+    ...(enabled ? WORKSPACE_ADDITIONAL_TOOLS.filter((tool) => !existing.has(tool.name)) : []),
   ];
+  message.result.tools = addApprovalToTools(message.result.tools);
   const headers = { ...(upstreamResponse.headers || {}) };
   delete headers['content-length'];
   return {
     ...upstreamResponse,
     headers,
     body: Buffer.from('event: message\ndata: ' + JSON.stringify(message) + '\n\n', 'utf8'),
+  };
+}
+
+function sendLocalMcpResult(response, payload, toolResult, sessionId) {
+  const message = {
+    jsonrpc: '2.0',
+    id: payload.id,
+    result: toolResult,
+  };
+  response.statusCode = 200;
+  response.setHeader('Content-Type', 'text/event-stream');
+  response.setHeader('Cache-Control', 'no-cache');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  if (sessionId) response.setHeader('Mcp-Session-Id', sessionId);
+  response.end('event: message\ndata: ' + JSON.stringify(message) + '\n\n');
+}
+
+function hostSessionFor(payload) {
+  const value = payload?.params?._meta?.['openai/session'];
+  return value == null || value === '' ? null : String(value);
+}
+
+async function executeApprovedBrowserTool(runtime, name, args, headers, url) {
+  if (runtime.workspace?.enabled && WORKSPACE_LOCAL_TOOL_NAMES.has(name)) {
+    try {
+      const data = name === 'bmg_show_workspace'
+        ? await runtime.workspace.showWorkspace(args)
+        : await runtime.workspace.hideWorkspace();
+      return { content: [{ type: 'text', text: JSON.stringify({ success: true, ...data }) }] };
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: String(error?.message || error) }],
+        isError: true,
+      };
+    }
+  }
+  let payload = {
+    jsonrpc: '2.0',
+    id: 'bmg-approved-' + Date.now(),
+    method: 'tools/call',
+    params: { name, arguments: args },
+  };
+  if (runtime.workspace) {
+    try {
+      payload = await runtime.workspace.rewrite(payload, { source: 'external-mcp' });
+    } catch (error) {
+      error.bmgPreDispatch = true;
+      throw error;
+    }
+  }
+  let upstreamResponse;
+  try {
+    upstreamResponse = await runtime.upstreamSession.request(headers, url, JSON.stringify(payload));
+  } catch (error) {
+    if (runtime.workspace) await runtime.workspace.settleToolCall(payload, null, error);
+    throw error;
+  }
+  const message = parseUpstreamMessage(upstreamResponse.body);
+  if (runtime.workspace) {
+    await runtime.workspace.settleToolCall(payload, message);
+  }
+  if (upstreamResponse.statusCode !== 200 || !message?.result) {
+    throw new UpstreamHttpError('Approved browser call did not return a usable result.', upstreamResponse);
+  }
+  return message.result;
+}
+
+function approvalResourceResult(payload) {
+  const uri = payload?.params?.uri;
+  if (payload?.method === 'resources/list') {
+    return { resources: [approvalUiResource()] };
+  }
+  if (payload?.method === 'resources/read' && isApprovalUiResource(uri)) {
+    return {
+      contents: [{
+        uri,
+        mimeType: 'text/html;profile=mcp-app',
+        text: APPROVAL_UI_HTML,
+        _meta: { ui: { prefersBorder: true } },
+      }],
+    };
+  }
+  return null;
+}
+
+function augmentApprovalResources(upstreamResponse) {
+  const message = parseUpstreamMessage(upstreamResponse.body);
+  if (upstreamResponse.statusCode !== 200 || !Array.isArray(message?.result?.resources)) {
+    return null;
+  }
+  if (!message.result.resources.some((resource) => isApprovalUiResource(resource?.uri))) {
+    message.result.resources.push(approvalUiResource());
+  }
+  return {
+    ...upstreamResponse,
+    headers: { ...(upstreamResponse.headers || {}), 'content-type': 'text/event-stream' },
+    body: Buffer.from('event: message\ndata: ' + JSON.stringify(message) + '\n\n'),
   };
 }
 
@@ -874,9 +980,26 @@ async function handleWorkspaceLocalTool(response, payload, runtime) {
 }
 
 function sendCachedInitialize(response, requestPayload, session) {
+  const upstream = session.initializeMessage;
   const message = {
-    ...session.initializeMessage,
+    ...upstream,
     id: requestPayload.id,
+    result: {
+      ...upstream.result,
+      capabilities: {
+        ...(upstream.result.capabilities || {}),
+        resources: { listChanged: true },
+      },
+      instructions: [
+        upstream.result.instructions || '',
+        'Prefer CCM for ordinary work; use BMG only when the user explicitly requests it. ' +
+        'BMG browser-tool calls require a timed approval_id unless approval mode is off. ' +
+        'In timed mode omit approval_id, then call request_approval with the returned ID; ' +
+        'the user approval card handles the frozen owner action once. ' +
+        'In totp mode ask the user for a six-digit code and call bmg_unlock. ' +
+        'An active grant may be reused on BMG browser tools until expiry.',
+      ].filter(Boolean).join('\n\n'),
+    },
   };
   response.statusCode = 200;
   response.setHeader('Content-Type', 'text/event-stream');
@@ -1155,6 +1278,10 @@ async function handleProtectedMcp(request, response, runtime, url) {
     try {
       payload = JSON.parse(body);
     } catch {}
+    if (Array.isArray(payload)) {
+      sendJson(response, 400, { error: 'jsonrpc_batch_not_supported' }, { noStore: true });
+      return;
+    }
     if (payload && payload.method === 'initialize') {
       const initialized = await runtime.upstreamSession.initializeFromRequest(
         request.headers,
@@ -1162,6 +1289,33 @@ async function handleProtectedMcp(request, response, runtime, url) {
       );
       sendCachedInitialize(response, payload, initialized);
       return;
+    }
+    if (payload?.method === 'resources/read') {
+      const localResource = approvalResourceResult(payload);
+      if (localResource) {
+        sendLocalMcpResult(response, payload, localResource, runtime.upstreamSession.sessionId);
+        return;
+      }
+    }
+    if (payload?.method === 'tools/call') {
+      const name = payload.params?.name;
+      const args = payload.params?.arguments || {};
+      if (isApprovalTool(name)) {
+        const toolResult = await runtime.approval.handleLocal(
+          name, args, hostSessionFor(payload),
+          (ownerName, ownerArgs) => executeApprovedBrowserTool(
+            runtime, ownerName, ownerArgs, request.headers, url,
+          ),
+        );
+        sendLocalMcpResult(response, payload, toolResult, runtime.upstreamSession.sessionId);
+        return;
+      }
+      const authorization = runtime.approval.authorize(name, args);
+      if (!authorization.allowed) {
+        sendLocalMcpResult(response, payload, authorization.toolResult, runtime.upstreamSession.sessionId);
+        return;
+      }
+      payload.params.arguments = authorization.args;
     }
     if (
       payload?.method === 'tools/call' &&
@@ -1172,7 +1326,7 @@ async function handleProtectedMcp(request, response, runtime, url) {
       return;
     }
     let forwardedPayload = payload;
-    let forwardedBody = body;
+    let forwardedBody = payload?.method === 'tools/call' ? JSON.stringify(payload) : body;
     if (payload && payload.method === 'tools/call' && runtime.workspace) {
       forwardedPayload = await runtime.workspace.rewrite(payload, { source: 'external-mcp' });
       forwardedBody = JSON.stringify(forwardedPayload);
@@ -1199,7 +1353,13 @@ async function handleProtectedMcp(request, response, runtime, url) {
     const responseToSend =
       payload?.method === 'tools/list'
         ? augmentWorkspaceTools(upstreamResponse, runtime.workspace?.enabled === true)
+        : payload?.method === 'resources/list'
+          ? augmentApprovalResources(upstreamResponse) || upstreamResponse
         : upstreamResponse;
+    if (payload?.method === 'resources/list' && !augmentApprovalResources(upstreamResponse)) {
+      sendLocalMcpResult(response, payload, approvalResourceResult(payload), runtime.upstreamSession.sessionId);
+      return;
+    }
     sendUpstreamResponse(response, responseToSend);
   } catch (error) {
     if (error instanceof UpstreamHttpError) {
@@ -1436,10 +1596,17 @@ export function createBmgServer(options = {}) {
       windowMs: options.registrationRateWindowMs ?? REGISTRATION_RATE_WINDOW_MS,
     }),
     upstreamSession: null,
+    approval: null,
     workspace: null,
     server: null,
   };
   runtime.upstreamSession = new UpstreamSessionManager(runtime);
+  runtime.approval = new BmgApprovalGate({
+    rootDir: config.rootDir,
+    logDir: config.logDir,
+    logger,
+    totpManager: options.totpManager || null,
+  });
   runtime.workspace = new BrowserWorkspaceRouter({
     enabled: config.workspaceMode,
     stateFile: config.workspaceStateFile,

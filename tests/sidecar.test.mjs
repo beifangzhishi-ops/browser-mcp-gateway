@@ -27,12 +27,156 @@ import {
   patchUpstreamToolsBackgroundText,
 } from '../scripts/patch-extension-upstream-tools.mjs';
 import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
+import { BmgApprovalGate } from '../sidecar/approval/index.mjs';
+import { BmgTotpManager, totpForCounter } from '../sidecar/approval/totp.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
 const RESOURCE = 'https://bmg.example.test/bmg/mcp';
 const PROTECTED_METADATA =
   'https://bmg.example.test/.well-known/oauth-protected-resource/bmg/mcp';
 const APPROVAL_SECRET = 'unit-test-approval-secret';
+
+test('BMG timed grant freezes its owner action, binds a card, prevents replay and revokes on policy change', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-approval-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'config'));
+  const policyFile = path.join(root, 'config', 'approval-policy.json');
+  fs.writeFileSync(policyFile, JSON.stringify({ version: 1, mode: 'timed', revision: 0 }));
+  const gate = new BmgApprovalGate({
+    rootDir: root, logDir: root, logger: { error() {} },
+  });
+  const first = gate.authorize('chrome_navigate', { url: 'https://example.org/' });
+  assert.equal(first.allowed, false);
+  assert.equal(first.toolResult.structuredContent.classification, 'approval_required');
+  const approvalId = first.toolResult.structuredContent.approval_id;
+  const card = await gate.handleLocal('request_approval', {
+    approval_id: approvalId, duration_seconds: 60,
+  }, 'session-A');
+  assert.equal(card.structuredContent.state, 'pending');
+  assert.equal(card.structuredContent.requested_duration_seconds, 60);
+  const nonce = card._meta.approval_nonce;
+  const wrongSession = await gate.handleLocal('get_approval_status', {
+    approval_id: approvalId, approval_nonce: nonce,
+  }, 'session-B');
+  assert.equal(wrongSession.isError, true);
+  const valid = await gate.handleLocal('get_approval_status', {
+    approval_id: approvalId, approval_nonce: nonce,
+  }, 'session-A');
+  assert.equal(valid.structuredContent.state, 'pending');
+
+  let dispatches = 0;
+  const executeFrozen = async (tool, args) => {
+    dispatches++;
+    assert.equal(tool, 'chrome_navigate');
+    assert.deepEqual(args, { url: 'https://example.org/' });
+    return { content: [{ type: 'text', text: 'navigated' }] };
+  };
+  const approveArgs = { approval_id: approvalId, approval_nonce: nonce, decision: 'approve' };
+  const resolved = await gate.handleLocal('resolve_pending_action', approveArgs, 'session-A', executeFrozen);
+  assert.equal(resolved.structuredContent.state, 'consumed');
+  assert.equal(resolved.structuredContent.grant_active, true);
+  assert.equal(dispatches, 1);
+  const repeat = await gate.handleLocal('resolve_pending_action', approveArgs, 'session-A', executeFrozen);
+  assert.equal(repeat.isError, true);
+  assert.equal(dispatches, 1);
+  const reused = gate.authorize('chrome_read_page', { approval_id: approvalId, tabId: 42 });
+  assert.equal(reused.allowed, true);
+  assert.deepEqual(reused.args, { tabId: 42 });
+
+  fs.writeFileSync(policyFile, JSON.stringify({ version: 1, mode: 'totp', revision: 1 }));
+  assert.equal(gate.authorize('chrome_read_page', { approval_id: approvalId }).allowed, false);
+  assert.equal(gate.authorize('chrome_read_page', {}).toolResult.structuredContent.classification, 'bmg_code_required');
+});
+
+test('BMG TOTP checks the WCM-equivalent clock window and prevents replay', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-totp-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const secret = Buffer.from('12345678901234567890');
+  const file = path.join(root, 'replay.json');
+  let now = 12_345_670_000;
+  const manager = () => new BmgTotpManager({
+    stateFile: file, secretProvider: () => secret, now: () => now,
+  });
+  const current = Math.floor(now / 30_000);
+  const older = totpForCounter(secret, current - 10);
+  assert.equal(manager().verify(older), true);
+  assert.equal(manager().verify(older), false);
+  const newest = totpForCounter(secret, current + 1);
+  assert.equal(manager().verify(newest), true);
+  assert.equal(manager().verify(newest), false);
+  for (let i = 0; i < 5; i++) manager().verify('invalid');
+  now += 30_000;
+  assert.equal(manager().verify(totpForCounter(secret, Math.floor(now / 30_000))), false);
+  now += 5 * 60_000;
+  assert.equal(manager().verify(totpForCounter(secret, Math.floor(now / 30_000))), true);
+  assert.equal(fs.readFileSync(file, 'utf8').includes(secret.toString('base64')), false);
+});
+
+test('public BMG MCP cannot dispatch browser calls before approval and strips the grant on reuse', async (t) => {
+  const fixture = await createTestRuntime({ approvalMode: 'timed' });
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+  const client = fixture.runtime.store.registerClient({
+    redirect_uris: ['http://127.0.0.1:19001/oauth/callback'],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  });
+  const token = fixture.runtime.store.mintTokenPair({
+    clientId: client.clientId, resource: RESOURCE, scope: 'mcp',
+    tokenTtlSeconds: 3600,
+  }).accessToken;
+  let rpcId = 10;
+  const call = async (method, params) => {
+    const response = await requestJson(fixture.baseUrl, '/bmg/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }),
+    });
+    assert.equal(response.response.status, 200);
+    return parseSse(response.text).result;
+  };
+  await call('initialize', {
+    protocolVersion: '2025-03-26', capabilities: {},
+    clientInfo: { name: 'approval-unit', version: '1' },
+  });
+  const blocked = await call('tools/call', { name: 'safe_ping', arguments: {} });
+  assert.equal(blocked.structuredContent.classification, 'approval_required');
+  assert.equal(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').length, 0);
+  const approvalId = blocked.structuredContent.approval_id;
+  const card = await call('tools/call', {
+    name: 'request_approval', arguments: { approval_id: approvalId, duration_seconds: 60 },
+  });
+  assert.equal(card.structuredContent.requested_duration_seconds, 60);
+  assert.ok(card._meta.approval_nonce);
+  const resource = await call('resources/read', { uri: 'ui://bmg/approval-v2.html' });
+  assert.match(resource.contents[0].text, /BMG approval/u);
+  const approved = await call('tools/call', {
+    name: 'resolve_pending_action',
+    arguments: { approval_id: approvalId, approval_nonce: card._meta.approval_nonce, decision: 'approve' },
+  });
+  assert.equal(approved.structuredContent.state, 'consumed');
+  assert.equal(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').length, 1);
+  const reused = await call('tools/call', {
+    name: 'safe_ping', arguments: { approval_id: approvalId },
+  });
+  assert.equal(reused.content[0].text, 'pong from 12306');
+  const lastCall = fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').at(-1);
+  assert.deepEqual(lastCall.payload.params.arguments, {});
+  const repeated = await call('tools/call', {
+    name: 'resolve_pending_action',
+    arguments: { approval_id: approvalId, approval_nonce: card._meta.approval_nonce, decision: 'approve' },
+  });
+  assert.equal(repeated.isError, true);
+  assert.equal(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').length, 2);
+});
 
 test('bmgctl propagates nested MCP tool failures', () => {
   assert.equal(toolCallFailed({ result: { isError: true } }), true);
@@ -357,6 +501,11 @@ async function createFakeUpstream({ initializeDelayMs = 0 } = {}) {
 async function createTestRuntime(options = {}) {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-sidecar-test-'));
   const fakeUpstream = await createFakeUpstream(options);
+  fs.mkdirSync(path.join(rootDir, 'config'), { recursive: true });
+  fs.writeFileSync(
+    path.join(rootDir, 'config', 'approval-policy.json'),
+    JSON.stringify({ version: 1, mode: options.approvalMode || 'off', revision: 0 }),
+  );
   const config = createConfig({
     rootDir,
     readEnvFile: false,
@@ -375,6 +524,7 @@ async function createTestRuntime(options = {}) {
     registrationRateLimit: options.registrationRateLimit,
     registrationRateWindowMs: options.registrationRateWindowMs,
     workspaceRecoverBrowser: null,
+    totpManager: options.totpManager,
     logger: { error() {}, log() {} },
   });
   await listenBmgServer(runtime);
@@ -636,7 +786,10 @@ test('OAuth registration, PKCE, bearer proxy, and revocation work end to end', a
     body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
   });
   assert.equal(tools.response.status, 200);
-  assert.deepEqual(parseSse(tools.text).result.tools.map((tool) => tool.name), ['safe_ping']);
+  assert.deepEqual(parseSse(tools.text).result.tools.map((tool) => tool.name), [
+    'safe_ping', 'bmg_unlock', 'approval_status', 'get_approval_status',
+    'request_approval', 'resolve_pending_action',
+  ]);
 
   const safeCall = await requestJson(fixture.baseUrl, '/bmg/mcp', {
     method: 'POST',
@@ -2053,19 +2206,27 @@ test('workspace tool list adds login guidance only to chrome_read_page', () => {
       jsonrpc: '2.0', id: 1, result: { tools: sourceTools },
     }) + '\n\n', 'utf8'),
   };
-  assert.equal(augmentWorkspaceToolsForTest(response, false), response);
+  const withoutWorkspace = parseSse(augmentWorkspaceToolsForTest(response, false).body.toString('utf8')).result.tools;
+  assert.deepEqual(withoutWorkspace.map((tool) => tool.name).slice(0, 3), sourceTools.map((tool) => tool.name));
+  assert.equal(withoutWorkspace.some((tool) => tool.name === 'bmg_show_workspace'), false);
+  assert.ok(withoutWorkspace.some((tool) => tool.name === 'request_approval'));
   const augmented = augmentWorkspaceToolsForTest(response, true);
   const tools = parseSse(augmented.body.toString('utf8')).result.tools;
   assert.deepEqual(tools.map((tool) => tool.name), [
     'chrome_read_page', 'chrome_computer', 'flow.sign-in', 'bmg_show_workspace', 'bmg_hide_workspace',
+    'bmg_unlock', 'approval_status', 'get_approval_status',
+    'request_approval', 'resolve_pending_action',
   ]);
   assert.ok(tools[0].description.startsWith(sourceTools[0].description + '\n'));
   assert.match(tools[0].description, /优先使用验证码登录/u);
   assert.match(tools[0].description, /CCM/u);
   assert.match(tools[0].description, /savePng=true/u);
   assert.match(tools[0].description, /填写并点击发送/u);
-  assert.deepEqual(tools[0].inputSchema, sourceTools[0].inputSchema);
-  assert.deepEqual(tools.slice(1, 3), sourceTools.slice(1));
+  assert.equal(tools[0].inputSchema.properties.approval_id.type, 'string');
+  assert.equal(tools[1].inputSchema.properties.approval_id.type, 'string');
+  assert.equal(tools[2].inputSchema.properties.approval_id.type, 'string');
+  assert.match(tools[1].description, /request_approval/u);
+  assert.match(tools[2].description, /bmg_unlock/u);
   assert.deepEqual(sourceTools[0].description, 'Read visible page elements');
   assert.equal(augmented.headers['content-length'], undefined);
   assert.equal(augmentWorkspaceToolsForTest({ ...response, statusCode: 502 }, true).statusCode, 502);

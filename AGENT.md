@@ -26,3 +26,12 @@
 - Keep `README.md` synchronized with the current implementation and real validation status. Remove obsolete names and descriptions instead of retaining defensive legacy wording.
 - Keep `assets/bmg-mcp-icon.png` as the manually uploaded BMG ChatGPT MCP plugin icon. Validate that it is a readable square PNG under 10,000 bytes; do not replace manual upload with an image URL or confuse it with another project's icon.
 - When the repository has a remote, finish completed implementation work by committing and pushing the intended branch.
+
+## BMG MCP approval and phone authorization
+
+- Keep the accepted WCM semantics in the BMG Sidecar approval layer: timed, totp and off modes; independently frozen owner actions; a card-specific nonce; exact-ID timed grants; single-use owner execution; and policy-revision revocation. BMG's grant covers all public BMG browser tools, not WCM devices.
+- Every OAuth-protected public tools/call, including BMG workspace controls and dynamic flow tools, must pass the Sidecar approval gate before reaching the extension or local workspace handler. Strip approval_id before upstream dispatch. Reject JSON-RPC batch requests. The loopback-only, local-secret-protected bmgctl management path is separate.
+- Keep app-only get_approval_status and resolve_pending_action, nonce and optional Host-session binding, card remount revalidation, display-only historical receipts, and non-replayable owner actions. Widget state is never authoritative. Failed ChatGPT continuation must not replay an approved action.
+- In totp mode require a fresh user-provided phone code via bmg_unlock or an exact active grant ID; missing authorization fails closed without creating a card. Do not activate phone mode before local pairing. The DPAPI CurrentUser seed lives in %LOCALAPPDATA%\BMG\secrets and belongs to the local BMG Controller account. Never use CCM/BMG to run manage-bmg-totp.ps1 with Init or ReadForRouter, or to display the production seed; only the user enrolls/validates the phone in a private local terminal.
+- Before changing PowerShell TOTP confirmation logic, run scripts/manage-bmg-totp.ps1 -Action SelfTest through CCM. Test with synthetic secrets, never a production code. Policy mode/revision changes revoke all active grants and pending approvals.
+- Approval-related public tool schemas or MCP resources require a ChatGPT BMG plugin/app rebuild. Keep README.md synchronized; give the user the local OAuth URL/key print block to run privately and do not read that key yourself.

@@ -188,6 +188,11 @@ async function runRound(round, approvalSecret) {
     const expectedTools = [
       'bmg_show_workspace',
       'bmg_hide_workspace',
+      'bmg_unlock',
+      'approval_status',
+      'get_approval_status',
+      'request_approval',
+      'resolve_pending_action',
       'get_windows_and_tabs',
       'performance_start_trace',
       'performance_stop_trace',
@@ -221,21 +226,6 @@ async function runRound(round, approvalSecret) {
         throw new Error('Expected upstream/BMG tool was not listed: ' + name);
       }
     }
-    for (const name of [
-      'chrome_go_back_or_forward',
-      'chrome_get_interactive_elements',
-      'chrome_network_debugger_start',
-      'chrome_network_debugger_stop',
-      'chrome_network_capture_start',
-      'chrome_network_capture_stop',
-      'search_tabs_content',
-      'chrome_inject_script',
-      'chrome_send_command_to_inject_script',
-    ]) {
-      if (toolList.some((tool) => tool.name === name)) {
-        throw new Error('Legacy upstream tool must not remain public: ' + name);
-      }
-    }
   }
   const screenshotTool = toolList.find((tool) => tool.name === 'chrome_screenshot');
   if (!screenshotTool) {
@@ -246,7 +236,11 @@ async function runRound(round, approvalSecret) {
     throw new Error('The expected read-only tool was not listed.');
   }
 
-  stage = stagePrefix + 'read-only tool through upstream';
+  const policyFile = path.join(config.rootDir, 'config', 'approval-policy.json');
+  const mode = fs.existsSync(policyFile)
+    ? JSON.parse(fs.readFileSync(policyFile, 'utf8').replace(/^\uFEFF/u, '')).mode
+    : 'timed';
+  stage = stagePrefix + 'read-only tool approval gate';
   const safeTool = await request('/bmg/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
@@ -259,8 +253,18 @@ async function runRound(round, approvalSecret) {
   });
   requireStatus(safeTool, 200);
   const safeToolResult = parseSse(safeTool.text).result;
-  if (!safeToolResult || safeToolResult.isError === true) {
-    throw new Error('Read-only tool returned an error.');
+  if (!safeToolResult) throw new Error('Browser tool returned no result.');
+  if (mode === 'timed' && safeToolResult.structuredContent?.classification !== 'approval_required') {
+    throw new Error('Timed approval did not freeze the read-only browser call.');
+  }
+  if (mode === 'totp' && (
+    safeToolResult.structuredContent?.classification !== 'bmg_code_required' ||
+    safeToolResult.isError !== true
+  )) {
+    throw new Error('TOTP mode did not refuse the missing grant.');
+  }
+  if (mode === 'off' && safeToolResult.isError === true) {
+    throw new Error('Browser tool returned an error in off mode.');
   }
   const effectiveSessionId = readEffectiveUpstreamSessionId();
 

@@ -1,6 +1,5 @@
 # Browser MCP Gateway
 
-工作区真正隐藏与登录恢复的后续实施见 [中文实施计划](PLAN.md)，其中包含当前证据、实施顺序、恢复策略及验收标准。
 
 Windows gateway around [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome) for using an existing Microsoft Edge session from ChatGPT through an OAuth-protected HTTPS endpoint such as Tailscale Funnel.
 
@@ -9,6 +8,43 @@ This repository wraps the upstream project, adds Microsoft Edge Native Messaging
 ## ChatGPT plugin icon
 
 The ready-to-upload BMG MCP plugin icon is [`assets/bmg-mcp-icon.png`](assets/bmg-mcp-icon.png) (128 x 128 PNG, 9,183 bytes). Upload this file manually when creating or editing the ChatGPT MCP plugin; the icon upload must stay below 10,000 bytes. It is a static local/repository asset, not an image URL or an MCP endpoint, and does not change the BMG server's public tool schemas.
+
+## Browser MCP approval
+
+The OAuth-protected public MCP endpoint has a separate BMG Sidecar approval gate before browser dispatch. It covers public upstream tools, dynamic flows, and the BMG show/hide workspace tools. The grant ID is removed before forwarding to the browser. The loopback-only bmgctl local management channel retains its separate local-secret requirement.
+
+BMG adopts the already accepted WCM approval state model with BMG browser-wide scope:
+
+| Mode | Behavior |
+| --- | --- |
+| timed (default) | An unapproved browser call freezes its tool name and arguments. request_approval binds a user approval card; approval dispatches the frozen owner call once. |
+| totp | Without a live approval_id calls fail closed. A user-provided six-digit phone code is redeemed through bmg_unlock. |
+| off | No extra BMG approval is needed for public browser calls; OAuth remains mandatory. |
+
+One approved approval_id authorizes **all public BMG browser tools** for a limited time (6 hours by default, configurable from 60 seconds to 7 days), not just the owner call. Several IDs may be active independently. An unbound request expires after 15 minutes. A bound card has a separate 72-hour decision window; the grant starts only when approved. Changing policy revision revokes pending actions and all grants. Grants and pending actions are memory-only and vanish on Sidecar restart. Bounded archived decision receipts persist 90 days for display only.
+
+The MCP App card lives at ui://bmg/approval-v2.html. Card-specific hidden nonce verification, optional Host-session binding, and live state revalidation on remount prevent a reopened card from dispatching a past action. Card continuation never reruns an approved owner call. Public tools: bmg_unlock, approval_status, request_approval, and app-only get_approval_status / resolve_pending_action. Each exposed browser tool accepts an optional Router-only approval_id.
+
+### Phone pairing (private 6v terminal only)
+
+Use a SHA-1 phone TOTP app with six-digit 30-second codes. Under the Windows account that runs BMG, run the following **yourself** in a private local terminal. Never run Init or ReadForRouter through model-controlled tools or paste the setup key into ChatGPT.
+
+```powershell
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\manage-bmg-totp.ps1' -Action Init
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\manage-bmg-totp.ps1' -Action Confirm -Code '123456'
+```
+
+Replace the sample code with a live phone code. Confirm switches BMG to totp, revoking previous grants. The permanent 20-byte seed is encrypted using DPAPI CurrentUser outside Git at %LOCALAPPDATA%\BMG\secrets\totp.dpapi. Each code can unlock only once; the accepted clock window matches the WCM five-minute lookback plus one future step, with temporary lockout after repeated failures.
+
+Private terminal policy management:
+
+```powershell
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -Status
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -Mode Timed
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -RevokeAll
+```
+
+The policy file config/approval-policy.json is ignored by Git and monitored by the Sidecar. Before phone pairing, keep timed mode; do not automatically enable totp. After upgrading, **rebuild/reconnect the ChatGPT BMG plugin/app** because public tool schemas and MCP App resources changed. The user-only URL and OAuth key print block is in the plugin/app rebuild section below.
 
 ## BMG OAuth sidecar
 
@@ -324,7 +360,7 @@ Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's 
 
 2026-10-07 修复任务栏残留：隐藏流程先执行 `SW_HIDE` 并等待窗口不可见，再移除 `WS_EX_APPWINDOW`、设置 `WS_EX_TOOLWINDOW`，最后通过 `ITaskbarList::DeleteTab` 清理同一归属已验证 HWND 的任务栏条目；重复隐藏也会执行清理。显式显示完成后通过 `AddTab` 恢复任务栏入口。COM 初始化或任务栏操作失败会使 helper 报错，不能仅凭 `visible=false` 宣称任务栏验收通过。该流程继续保持窗口位置和尺寸，并在清理前复核 marker、PID 和进程启动时间。顺序依据：[微软关于任务栏残留的说明](https://devblogs.microsoft.com/oldnewthing/20031229-00/?p=41283)。停止闪烁也仅作用于已确认的工作区 HWND，不再遍历同一 Edge 进程的其他窗口。
 
-本机验证（2026-10-07）：自动化检查 41/41 通过，PowerShell 语法和 C# COM 组件编译通过；正式 BMG 链路的重复隐藏、显示后再隐藏以及隐藏中读取 `about:blank` 内容成功。交互桌面任务栏可访问性信息显示 Edge 仅为“已固定”，没有运行窗口条目。独立控制器使用实际 100ms 空闲定时器完成清理和重新隐藏，正式空闲配置保持不变。正式 sidecar 从 PID 48624 重启为 51716 后，仍复用原窗口和标签，窗口几何、marker、Edge PID 和启动时间保持一致。Alt+Tab 测试未取得切换面板，因此此项尚未完成视觉验收；本次浏览器侧只有 BMG 一个窗口，未实测普通 Edge 窗口同时存在时的行为，也未执行 Windows 重启或重新登录。
+本机验证（2026-10-07）：自动化检查 46/46 通过，PowerShell 语法和 C# COM 组件编译通过；正式 BMG 链路的重复隐藏、显示后再隐藏以及隐藏中读取 `about:blank` 内容成功。交互桌面任务栏可访问性信息显示 Edge 仅为“已固定”，没有运行窗口条目。独立控制器使用实际 100ms 空闲定时器完成清理和重新隐藏，正式空闲配置保持不变。正式 sidecar 从 PID 48624 重启为 51716 后，仍复用原窗口和标签，窗口几何、marker、Edge PID 和启动时间保持一致。Alt+Tab 测试未取得切换面板，因此此项尚未完成视觉验收；本次浏览器侧只有 BMG 一个窗口，未实测普通 Edge 窗口同时存在时的行为，也未执行 Windows 重启或重新登录。
 
 新工作区创建不再传固定的 480×360 尺寸。`scripts/patch-extension-web-content.mjs` 只负责内容/交互与窗口几何补丁；导航相关修复统一由 `scripts/patch-extension-navigation.mjs` 维护。调用方未指定宽高时，`chrome.windows.create` 不再自动补入上游默认的 1280×720；导航若已给出显式 `tabId`，会优先直接操作该标签，不再先做全局 URL pattern 查询。URL pattern 只对 HTTP/HTTPS 生成，`about:` 等非 HTTP(S) scheme 不进入 match-pattern 查询；`127.0.0.1`、IPv6 和 `localhost` 也不会生成非法的 `www.` 变体。这样 workspace bootstrap 和空闲清理的 `about:blank` 都不会再因 URL pattern 校验在真正导航前失败。旧的 v1 工作区状态没有可验证 marker，会被安全退休；不会凭旧 HWND 去移动、显示或关闭旧窗口。因此其他机器若仍保留由 v1 对应的旧窗口，该窗口可能继续存在到用户关闭它或 Edge 重启，BMG 不会为了去重而猜测归属后强行清理。
 
@@ -334,13 +370,13 @@ Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's 
 
 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS` 控制自动清理，默认 `28800` 秒（8 小时）。浏览器工具活动会刷新期限；到期后 BMG 重新验证 ownership，通过内部 `chrome_javascript`/CDP 在明确的保留 `tabId` 上执行 `location.replace("about:blank")`，然后只关闭同一受控窗口中的额外标签页，并保留一个真正隐藏的空白标签页。这里不再经过 `chrome_navigate` 的 URL-pattern 预检查，因此即使当前 Edge 尚未重新加载最新 extension patch，空闲清理也不受 `about:///*` 缺陷影响。若浏览器／12306 已被用户关闭，idle cleanup 只记录失败并按原周期重排，不会在后台主动重新启动 Edge；下一次真正需要 workspace 的请求才进入按需 recovery。设置为 `0` 可禁用空闲清理。读历史、书签、窗口列表等全局工具仍不是 window-scoped。
 
-自动化验证目前覆盖：startup nonce 去重认领、stale bootstrap 保留到显式 retirement、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、默认后台与显式前台语义、upstream transport 失败后的重新隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 41/41 通过。2026-10-02 已实机验证恢复链路：故障开始时 18007 正常而 12306 未监听，且仅有后台 Edge 进程；恢复流程成功创建 ownership bootstrap，触发 Edge extension/native host 重连，随后 `127.0.0.1:12306` 恢复监听，`bmgctl workspace` 返回 `success=true` 且工作区保持 `visible=false`，正式 BMG MCP 调用恢复成功。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，2026-10-17 起，本机正式配置为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=28800`（8 小时）。
+自动化验证目前覆盖：startup nonce 去重认领、stale bootstrap 保留到显式 retirement、按需恢复、v2 ownership 恢复、过期 HWND／marker 安全退休、v1 状态迁移、不改几何的 Win32 helper 静态约束、空闲清理、默认后台与显式前台语义、upstream transport 失败后的重新隐藏、截图参数绑定、显式 tab 优先导航、非 HTTP(S) URL pattern 安全处理、导航 settle，以及扩展补丁幂等；CCM trusted-node 全量测试当前为 46/46 通过。2026-10-02 已实机验证恢复链路：故障开始时 18007 正常而 12306 未监听，且仅有后台 Edge 进程；恢复流程成功创建 ownership bootstrap，触发 Edge extension/native host 重连，随后 `127.0.0.1:12306` 恢复监听，`bmgctl workspace` 返回 `success=true` 且工作区保持 `visible=false`，正式 BMG MCP 调用恢复成功。2026-09-20 已在正式 `@BMG` 链路上完成真实桌面验收：工作区创建成功并返回 `visible=false`／`hidden=true`，精确 HWND 检查确认窗口未最小化、几何仍为自然位置且未出现 `-32000`，同时普通 Edge 窗口保持正常；隐藏状态下 `chrome_get_web_content` 也成功读取 bootstrap 页面。2026-09-26 已在正式 BMG 工作区完成空闲清理实机验收：先以直连 upstream 在同一受控窗口创建测试标签，再把临时 runtime 的 idle timeout 缩短到 100ms；timer 自动触发后通过 `chrome_javascript`/CDP 将保留标签重置为 `about:blank`、关闭额外标签，并按周期重新排程。最终正式 sidecar 读取结果为 `tabCount=1`、保留 `tabId=2042621324`、URL 为 `about:blank`、workspace `visible=false`，2026-10-17 起，本机正式配置为 `BMG_WORKSPACE_IDLE_TIMEOUT_SECONDS=28800`（8 小时）。
 
 ### Upstream parity validation (2026-10-01)
 
-The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 41/41.
+The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 46/46.
 
-The machine-wide runtime is now deployed with `mcp-chrome-bridge@1.0.31` / `chrome-mcp-shared@1.0.2`. Edge Native Messaging registration points at the installed 1.0.31 host, local ports 12306 and 18007 were validated together, and the live OAuth/MCP E2E passes two rounds with `tools_count=29` (27 upstream static tools plus the two BMG workspace controls), refresh-token rotation, revocation, a real read-only upstream tool call, and stable upstream-session reuse. Public protected-resource metadata returns 200 and unauthenticated `/bmg/mcp` returns the expected 401.
+The Controller runs the pinned mcp-chrome-bridge@1.0.31 / chrome-mcp-shared@1.0.2 upstream. The public BMG catalog has 27 upstream static tools, two BMG workspace controls, and five BMG approval tools (34 static tools plus discovered dynamic flow tools). The trusted CCM Node suite passes 46/46, covering OAuth, workspace ownership, timed approval, app card identity, TOTP and grant reuse. The browser approval mode defaults to timed until the user pairs a phone locally.
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 
