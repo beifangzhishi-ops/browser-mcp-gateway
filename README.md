@@ -332,6 +332,18 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
+### Upstream disconnection diagnostics (2026-11-02)
+
+The BMG Sidecar writes `logs/bmg-upstream-diagnostics.jsonl` to help investigate why the browser bridge on local port 12306 becomes unavailable while the OAuth Sidecar on 18007 remains healthy. After Sidecar startup, a passive TCP-connect probe runs every 30 seconds; it neither executes browser tools nor launches Edge. `monitor_started` and `monitor_stopped` mark Sidecar lifecycle. `upstream_state_changed` is written on the first observation and on later up/down transitions (including the previous state and duration). On Windows a transition also captures machine-wide `msedge.exe` and `node.exe` PID/count snapshots when permitted; these are contextual evidence **not proof** of native-host ownership or an exit reason. Failed process inspection is reported with a code and does not interrupt monitoring.
+
+The same log includes `upstream_request_failed` with stage and safe error code/HTTP status, `upstream_session_rejected` / `upstream_session_invalidated`, and `workspace_recovery_*` / `workspace_bootstrap_*` events. Read these alongside `logs/bmg-workspace-startup.log` and `logs/bmg-window-transitions.jsonl`. TCP failures show the failure window to approximately 30 seconds but do not establish whether Edge closed normally, Native Messaging exited, Windows killed a process, or a restart removed the listener. Very short outages between probes may be missed; a listening TCP port alone is not an MCP tool-health check. Event data intentionally excludes page URLs, titles, tool arguments, authentication material, nonce/ownership markers, and raw exception messages. The log is ignored by Git and remains across Sidecar restarts, rotating at 10 MiB to one `.jsonl.1` backup (at most about 20 MiB total). Monitoring is observation-only: **idle cleanup and probe ticks do not recover/relaunch Edge**. No public MCP schema changes or plugin rebuild are required.
+
+For a quick local read of recent events, run:
+
+```powershell
+Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\logs\bmg-upstream-diagnostics.jsonl' -Tail 80
+```
+
 ### Window transition diagnostics (2026-10-28)
 
 The sidecar appends one JSON object per event to `logs/bmg-window-transitions.jsonl`, retaining the history across service restarts. Explicit `bmg_show_workspace` and `bmg_hide_workspace` calls emit `command` and `command-result`; the underlying ownership-verified window helper emits paired `request` / `result` entries for explicit calls and automatic operations. `reason` distinguishes `explicit-show`, `explicit-hide`, `revalidate`, `page-foreground`, `page-background`, `page-settle`, `page-error`, `element-picker`, and `idle-cleanup`. `sequence` correlates one helper request and result within a single sidecar process.

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadConfig } from './config.mjs';
 import { BrowserWorkspaceRouter } from './workspace.mjs';
+import { UpstreamDiagnostics } from './upstream-diagnostics.mjs';
 import {
   BmgApprovalGate,
   addApprovalToTools,
@@ -775,7 +776,9 @@ function requestUpstreamBuffer(runtime, method, url, headers, body = null) {
       },
     );
     upstreamRequest.on('timeout', () => {
-      upstreamRequest.destroy(new Error('upstream timeout'));
+      const error = new Error('upstream timeout');
+      error.code = 'ETIMEDOUT';
+      upstreamRequest.destroy(error);
     });
     upstreamRequest.on('error', (error) => {
       if (!settled) {
@@ -1141,14 +1144,21 @@ class UpstreamSessionManager {
 
   async createSession() {
     const body = JSON.stringify(this.initializeRequest.payload);
-    const response = await requestUpstreamBuffer(
+    let response;
+    try {
+      response = await requestUpstreamBuffer(
       this.runtime,
       'POST',
       new URL(MCP_PATH, 'http://127.0.0.1'),
       buildUpstreamHeaders(this.initializeRequest.headers, body),
       body,
-    );
+      );
+    } catch (error) {
+      this.runtime.diagnostics.requestFailure('initialize', error);
+      throw error;
+    }
     if (response.statusCode !== 200) {
+      this.runtime.diagnostics.requestFailure('initialize_http', null, response.statusCode);
       throw new UpstreamHttpError('Upstream initialize failed.', response);
     }
     const message = parseUpstreamMessage(response.body);
@@ -1173,28 +1183,33 @@ class UpstreamSessionManager {
     }
     this.sessionId = null;
     this.initializeMessage = null;
+    this.runtime.diagnostics.record('upstream_session_invalidated');
     removeUpstreamSession(this.runtime.config.upstreamSessionFile);
   }
 
   async request(requestHeaders, url, body) {
     const session = await this.ensureSession();
-    let response = await requestUpstreamBuffer(
-      this.runtime,
-      'POST',
-      url,
-      buildUpstreamHeaders(requestHeaders, body, session.sessionId),
-      body,
-    );
+    const send = async (activeSession, stage) => {
+      try {
+        const upstreamResponse = await requestUpstreamBuffer(this.runtime, 'POST', url,
+          buildUpstreamHeaders(requestHeaders, body, activeSession.sessionId), body);
+        if (upstreamResponse.statusCode >= 400) {
+          this.runtime.diagnostics.requestFailure(stage + '_http', null, upstreamResponse.statusCode);
+        }
+        return upstreamResponse;
+      } catch (error) {
+        this.runtime.diagnostics.requestFailure(stage, error);
+        throw error;
+      }
+    };
+    let response = await send(session, 'request');
     if (isInvalidUpstreamSession(response)) {
+      this.runtime.diagnostics.record('upstream_session_rejected', {
+        http_status: response.statusCode,
+      });
       this.invalidate(session.sessionId);
       const refreshedSession = await this.ensureSession();
-      response = await requestUpstreamBuffer(
-        this.runtime,
-        'POST',
-        url,
-        buildUpstreamHeaders(requestHeaders, body, refreshedSession.sessionId),
-        body,
-      );
+      response = await send(refreshedSession, 'retry_after_session_rejected');
     }
     return response;
   }
@@ -1596,10 +1611,14 @@ export function createBmgServer(options = {}) {
       windowMs: options.registrationRateWindowMs ?? REGISTRATION_RATE_WINDOW_MS,
     }),
     upstreamSession: null,
+    diagnostics: null,
     approval: null,
     workspace: null,
     server: null,
   };
+  runtime.diagnostics = options.diagnostics ?? new UpstreamDiagnostics({
+    logDir: config.logDir, upstreamUrl, logger,
+  });
   runtime.upstreamSession = new UpstreamSessionManager(runtime);
   runtime.approval = new BmgApprovalGate({
     rootDir: config.rootDir,
@@ -1613,6 +1632,7 @@ export function createBmgServer(options = {}) {
     startupStateFile: path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
     idleTimeoutMs: config.workspaceIdleTimeoutSeconds * 1000,
     logger,
+    onRecoveryEvent: (event, details) => runtime.diagnostics.record(event, details),
     onWindowTransition: (event) => fs.appendFileSync(
       path.join(config.logDir, 'bmg-window-transitions.jsonl'),
       JSON.stringify(event) + '\n',
@@ -1658,6 +1678,7 @@ export function listenBmgServer(runtime, port = runtime.config.port, host = runt
     };
     const handleListening = () => {
       runtime.server.off('error', handleError);
+      runtime.diagnostics.start();
       resolve(runtime);
     };
     runtime.server.once('error', handleError);
@@ -1667,6 +1688,7 @@ export function listenBmgServer(runtime, port = runtime.config.port, host = runt
 }
 
 export async function closeBmgServer(runtime) {
+  await runtime.diagnostics.stop();
   await runtime.workspace?.close?.();
   await runtime.upstreamSession.close();
   if (!runtime.server.listening) {

@@ -164,6 +164,7 @@ export class BrowserWorkspaceRouter {
     ensureWindowHidden = async () => {},
     showWindow = async () => {},
     recoverBrowser = null,
+    onRecoveryEvent = null,
     recoveryDelaysMs = [1000, 2500, 5000],
     wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
     idleTimeoutMs = 30 * 60 * 1000,
@@ -186,6 +187,7 @@ export class BrowserWorkspaceRouter {
     this.showWindow = (hwnd, marker, activate = false, reason = 'maintenance') =>
       this.transitionWindow('show', reason, hwnd, activate, () => showWindow(hwnd, marker, activate));
     this.recoverBrowser = typeof recoverBrowser === 'function' ? recoverBrowser : null;
+    this.onRecoveryEvent = typeof onRecoveryEvent === 'function' ? onRecoveryEvent : null;
     this.recoveryDelaysMs = Array.isArray(recoveryDelaysMs)
       ? recoveryDelaysMs.map(Number).filter((delay) => Number.isFinite(delay) && delay >= 0)
       : [];
@@ -584,18 +586,37 @@ export class BrowserWorkspaceRouter {
       const source = context?.source || 'workspace';
       const tool = context?.tool ? `:${context.tool}` : '';
       this.logger?.log?.(`BMG workspace recovery start source=${source}${tool}.`);
-      await this.recoverBrowser();
+      const evidence = { source: ['local-control', 'external-mcp', 'workspace'].includes(source)
+        ? source : 'other' };
+      this.onRecoveryEvent?.('workspace_recovery_started', evidence);
+      try {
+        await this.recoverBrowser();
+        this.onRecoveryEvent?.('workspace_bootstrap_completed', evidence);
+      } catch (error) {
+        this.onRecoveryEvent?.('workspace_bootstrap_failed', {
+          ...evidence, error_code: typeof error?.code === 'string' && /^[A-Z_0-9]{1,40}$/u.test(error.code)
+            ? error.code : 'UNKNOWN',
+        });
+        throw error;
+      }
       let lastError = firstError;
-      for (const delay of this.recoveryDelaysMs) {
+      for (const [index, delay] of this.recoveryDelaysMs.entries()) {
         if (delay > 0) await this.wait(delay);
         try {
           const workspace = await this.prepareWorkspaceOnce();
           this.logger?.log?.(`BMG workspace recovery succeeded source=${source}${tool}.`);
+          this.onRecoveryEvent?.('workspace_recovery_succeeded', { ...evidence, attempt: index + 1 });
           return workspace;
         } catch (error) {
           lastError = error;
+          this.onRecoveryEvent?.('workspace_recovery_retry_failed', {
+            ...evidence, attempt: index + 1,
+            error_code: typeof error?.code === 'string' && /^[A-Z_0-9]{1,40}$/u.test(error.code)
+              ? error.code : 'UNKNOWN',
+          });
         }
       }
+      this.onRecoveryEvent?.('workspace_recovery_exhausted', evidence);
       throw lastError;
     }
   }

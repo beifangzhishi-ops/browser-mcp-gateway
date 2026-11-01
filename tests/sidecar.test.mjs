@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { createHash, randomBytes } from 'node:crypto';
 import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, augmentWorkspaceToolsForTest } from '../sidecar/server.mjs';
+import { UpstreamDiagnostics, probeTcpPort } from '../sidecar/upstream-diagnostics.mjs';
 import { createConfig } from '../sidecar/config.mjs';
 import { BrowserWorkspaceRouter } from '../sidecar/workspace.mjs';
 import { prepareWorkspace } from '../scripts/ensure-workspace.mjs';
@@ -176,6 +177,54 @@ test('public BMG MCP cannot dispatch browser calls before approval and strips th
   });
   assert.equal(repeated.isError, true);
   assert.equal(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').length, 2);
+});
+
+test('passive upstream diagnostics record transitions, safe failure codes and process evidence', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-diagnostics-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-11-02T00:00:00Z');
+  const observations = [
+    { state: 'up' }, { state: 'up' },
+    { state: 'down', code: 'ECONNREFUSED' }, { state: 'down', code: 'ECONNREFUSED' },
+    { state: 'up' },
+  ];
+  const diagnostics = new UpstreamDiagnostics({
+    logDir: dir, upstreamUrl: 'http://127.0.0.1:12306',
+    now: () => clock,
+    probe: async () => observations.shift(),
+    snapshot: async () => ({ edge_count: 1, edge_pids: [42], node_count: 1, node_pids: [43] }),
+  });
+  for (let index = 0; index < 5; index += 1) {
+    await diagnostics.pollOnce();
+    clock += 30_000;
+  }
+  const secret = 'https://example.test/private?code=secret-value';
+  diagnostics.requestFailure('request', Object.assign(new Error(secret), { code: 'ECONNRESET' }));
+  diagnostics.requestFailure('initialize', new Error(secret), 503);
+  const text = fs.readFileSync(path.join(dir, 'bmg-upstream-diagnostics.jsonl'), 'utf8');
+  const events = text.trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.map((event) => event.event), [
+    'upstream_state_changed', 'upstream_state_changed', 'upstream_state_changed',
+    'upstream_request_failed', 'upstream_request_failed',
+  ]);
+  assert.deepEqual(events.slice(0, 3).map((event) => event.state), ['up', 'down', 'up']);
+  assert.equal(events[1].tcp_error, 'ECONNREFUSED');
+  assert.equal(events[1].previous_duration_ms, 60_000);
+  assert.deepEqual(events[1].processes.edge_pids, [42]);
+  assert.equal(events[3].code, 'ECONNRESET');
+  assert.equal(events[4].http_status, 503);
+  assert.doesNotMatch(text, /secret-value|example\.test|private/u);
+});
+
+test('upstream TCP probe detects local listener availability without HTTP requests', async () => {
+  const server = http.createServer();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const target = { host: '127.0.0.1', port: server.address().port };
+  assert.equal((await probeTcpPort(target)).state, 'up');
+  await new Promise((resolve) => server.close(resolve));
+  const missing = await probeTcpPort(target);
+  assert.equal(missing.state, 'down');
+  assert.equal(missing.code, 'ECONNREFUSED');
 });
 
 test('bmgctl propagates nested MCP tool failures', () => {
