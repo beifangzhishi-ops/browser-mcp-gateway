@@ -111,6 +111,12 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 
 `call` uses `/internal/tool-call`, which has the same loopback/no-Origin/local-secret protection as `/internal/ensure-workspace`. Page operations are rewritten through the workspace router and therefore target the dedicated BMG GPT workspace rather than an arbitrary normal Edge tab. Ref-based automation tools such as `chrome_read_page` and CDP-backed `chrome_computer` are routed through the same dedicated workspace. External consumers should call `bmgctl`; they should not read BMG OAuth state, the approval-secret file, or private `/internal/*` implementation details directly.
 
+### Required post-maintenance health acceptance
+
+After every maintenance/deployment or restart, verify **the entire live browser chain**, not just the Sidecar `/health` response or unit tests: check Sidecar health and that port 18007 has its expected listener/PID; verify independent port 12306 is LISTENING with a live upstream process and that the Sidecar can reach it; inspect the passive upstream/error diagnostics; confirm `bmgctl workspace` reports the owned workspace; and successfully perform a harmless read-only browser tool call through `bmgctl call` to prove the extension/native messaging/upstream/Sidecar path works. Report each checked layer and any failures. A bound port alone does not establish browser tool health.
+
+Do **not** restart Edge, the upstream 12306 host, or the Sidecar during health checks. A restart must be justified by a diagnosed failure and restricted to the affected component; verify the full chain again afterward. If 12306 refuses to listen, preserve failure logs and investigate its actual upstream/Native Messaging lifecycle instead of repeatedly restarting 18007 or terminating unrelated Edge processes. This acceptance rule is also recorded in `AGENT.md` for future project maintenance.
+
 The repository also declares `bmgctl` as its package `bin`, so `npm link` can expose the command on PATH. Consumers that do not use PATH may point directly at `bmgctl.cmd`.
 
 如需移除：
