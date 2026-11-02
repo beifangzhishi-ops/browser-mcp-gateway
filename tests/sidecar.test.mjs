@@ -56,6 +56,34 @@ test('live acceptance rejects nested browser errors, malformed results and fallb
   assert.equal(inspectBrowserToolResponse({ success: false, result: { isError: false } }).passed, false);
 });
 
+test('实时验收区分成功主树的补读与主树失败的兜底', () => {
+  const inspect = (payload) => inspectBrowserToolResponse({
+    success: true,
+    result: { isError: false, content: [{ type: 'text', text: JSON.stringify(payload) }] },
+  }, { requireAccessibilityTree: true });
+  const supplemented = {
+    success: true, pageContent: '- document\n  - text', fallbackUsed: true,
+    fallbackSource: 'get_interactive_elements', reason: 'sparse_tree', sparse: true,
+    stats: { processed: 2, included: 2, durationMs: 0 },
+  };
+  assert.deepEqual(inspect(supplemented), {
+    passed: true, reason: 'primary_tree_with_interactive_supplement',
+  });
+  for (const changed of [
+    { reason: 'tree_failed' }, { reason: 'read page accessibility helper timed out' },
+    { sparse: false }, { fallbackSource: 'cdp' },
+    { pageContent: '' }, { pageContent: '  ' }, { stats: null },
+    { stats: { processed: 0, included: 0 } },
+    { stats: { processed: 2, included: 0 } },
+    { stats: { processed: 1, included: 2 } },
+    { stats: { processed: '2', included: 2 } },
+  ]) {
+    assert.deepEqual(inspect({ ...supplemented, ...changed }), {
+      passed: false, reason: 'accessibility_tree_fallback_only',
+    });
+  }
+});
+
 test('BMG timed grant freezes its owner action, binds a card, prevents replay and revokes on policy change', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-approval-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

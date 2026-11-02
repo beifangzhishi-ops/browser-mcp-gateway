@@ -21,7 +21,18 @@ export function inspectBrowserToolResponse(response, { requireAccessibilityTree 
   }
   if (payload?.success !== true) return { passed: false, reason: 'tool_payload_error' };
   if (requireAccessibilityTree && payload.fallbackUsed === true) {
-    return { passed: false, reason: 'accessibility_tree_fallback_only' };
+    // sparse_tree 只在主树读取成功后产生；此分支保留主树正文，交互元素作为补充。
+    const stats = payload.stats;
+    const primaryTreeSupplemented = payload.reason === 'sparse_tree'
+      && payload.sparse === true
+      && payload.fallbackSource === 'get_interactive_elements'
+      && typeof payload.pageContent === 'string' && payload.pageContent.trim().length > 0
+      && Number.isInteger(stats?.processed) && stats.processed > 0
+      && Number.isInteger(stats?.included) && stats.included > 0
+      && stats.included <= stats.processed;
+    return primaryTreeSupplemented
+      ? { passed: true, reason: 'primary_tree_with_interactive_supplement' }
+      : { passed: false, reason: 'accessibility_tree_fallback_only' };
   }
   if (requireAccessibilityTree && typeof payload.pageContent !== 'string') {
     return { passed: false, reason: 'missing_accessibility_content' };
@@ -141,7 +152,7 @@ export async function checkLiveService() {
     const encoded = Buffer.from(JSON.stringify(item.args)).toString('base64');
     const result = callBmgctl(['call', item.tool, '--args-base64', encoded]);
     const inspected = inspectBrowserToolResponse(result.payload, { requireAccessibilityTree: item.tree });
-    report(item.name, inspected.passed && result.ok, inspected.passed ? 'ok' : inspected.reason);
+    report(item.name, inspected.passed && result.ok, inspected.reason);
   }
 
   const finalProbe = listeningPids();
