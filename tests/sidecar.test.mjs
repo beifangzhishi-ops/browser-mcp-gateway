@@ -31,6 +31,7 @@ import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
 import { inspectBrowserToolResponse } from '../scripts/check-bmg-live.mjs';
 import { BmgApprovalGate } from '../sidecar/approval/index.mjs';
 import { BmgTotpManager, totpForCounter } from '../sidecar/approval/totp.mjs';
+import './web-unlock.test.mjs';
 
 const ISSUER = 'https://bmg.example.test/bmg';
 const RESOURCE = 'https://bmg.example.test/bmg/mcp';
@@ -700,6 +701,92 @@ async function createTestRuntime(options = {}) {
   };
 }
 
+test('BMG fixed web unlock HTTP route pairs with mock OTP, rejects missing cookies, issues and claims once', async (t) => {
+  let codeUsed = false;
+  const fixture = await createTestRuntime({
+    approvalMode: 'either',
+    totpManager: {
+      verify(code) {
+        if (code !== '654321' || codeUsed) return false;
+        codeUsed = true;
+        return true;
+      },
+    },
+  });
+  t.after(async () => {
+    await closeBmgServer(fixture.runtime);
+    await fixture.fakeUpstream.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  });
+  const url = fixture.baseUrl + '/bmg/unlock';
+  const cookies = new Map();
+  const absorb = (response) => {
+    for (const item of response.headers.getSetCookie()) {
+      const first = item.split(';')[0];
+      const equal = first.indexOf('=');
+      cookies.set(first.slice(0, equal), first.slice(equal + 1));
+    }
+  };
+  const cookieHeader = () => [...cookies].map(([name, value]) => `${name}=${value}`).join('; ');
+  const csrfFrom = (html) => html.match(/name="csrf" value="([^"]+)"/)?.[1];
+  const getPage = async () => {
+    const response = await fetch(url, { headers: { Cookie: cookieHeader() } });
+    absorb(response);
+    return { response, html: await response.text() };
+  };
+  const postForm = async (fields, { cookiesEnabled = true } = {}) => {
+    const response = await fetch(url, {
+      method: 'POST', redirect: 'manual',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: 'null', 'Sec-Fetch-Site': 'cross-site',
+        ...(cookiesEnabled ? { Cookie: cookieHeader() } : {}),
+      },
+      body: new URLSearchParams(fields).toString(),
+    });
+    absorb(response);
+    return response;
+  };
+  let page = await getPage();
+  assert.equal(page.response.status, 200);
+  assert.match(page.response.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  assert.match(page.response.headers.get('cache-control'), /no-store/);
+  assert.match(page.html, /BMG 临时解锁/);
+  const initialCsrf = csrfFrom(page.html);
+  assert.ok(initialCsrf);
+  assert.equal((await postForm({ csrf: initialCsrf, action: 'pair', code: '654321' }, {
+    cookiesEnabled: false,
+  })).status, 403);
+  assert.equal(codeUsed, false, 'missing CSRF cookie cannot redeem OTP');
+  let response = await postForm({ csrf: initialCsrf, action: 'pair', code: '654321' });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('location'), '/bmg/unlock?paired=1');
+  assert.equal(codeUsed, true);
+  assert.equal(fixture.runtime.approval.grants.snapshot().grant_count, 0, 'pairing is not unlocking');
+  const browserState = fs.readFileSync(path.join(fixture.rootDir, '.state', 'bmg-web-browsers.json'), 'utf8');
+  assert.ok(!browserState.includes(cookies.get('__Secure-bmg-web-pair')), 'only pairing token hash is persisted');
+  page = await getPage();
+  assert.doesNotMatch(page.html, /name="code"/);
+  response = await postForm({ csrf: csrfFrom(page.html), action: 'unlock', duration_seconds: '300' });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('location'), '/bmg/unlock?issued=1');
+  assert.equal(fixture.runtime.approval.grants.snapshot().grant_count, 1);
+  const claim = await fixture.runtime.approval.handleLocal('bmg_claim_web_unlock', {}, null);
+  assert.equal(claim.structuredContent.classification, 'web_unlock_claimed');
+  const id = claim.structuredContent.approval_id;
+  assert.equal(fixture.runtime.approval.authorize('chrome_read_page', { approval_id: id }).allowed, true);
+  const repeated = await fixture.runtime.approval.handleLocal('bmg_claim_web_unlock', {}, null);
+  assert.equal(repeated.isError, true, 'one web grant may be claimed only once');
+  assert.equal(fixture.runtime.approval.grants.active(id)?.grant_state, 'active');
+  fs.writeFileSync(path.join(fixture.rootDir, 'config', 'approval-policy.json'), JSON.stringify({
+    version: 1, mode: 'either', revision: 1,
+  }));
+  assert.equal(fixture.runtime.approval.authorize('chrome_read_page', { approval_id: id }).allowed, false);
+  page = await getPage();
+  assert.match(page.html, /name="code"/, 'policy revision forces browser re-pair');
+  assert.equal((await fetch(url + '/other')).status, 404, 'no wildcard public unlock routes');
+});
+
 test('BMG identity and discovery expose the exact public metadata', async (t) => {
   const fixture = await createTestRuntime();
   t.after(async () => {
@@ -950,7 +1037,7 @@ test('OAuth registration, PKCE, bearer proxy, and revocation work end to end', a
   });
   assert.equal(tools.response.status, 200);
   assert.deepEqual(parseSse(tools.text).result.tools.map((tool) => tool.name), [
-    'safe_ping', 'bmg_unlock', 'approval_status', 'get_approval_status',
+    'safe_ping', 'bmg_claim_web_unlock', 'bmg_unlock', 'approval_status', 'get_approval_status',
     'request_approval', 'resolve_pending_action',
   ]);
 
@@ -2377,7 +2464,7 @@ test('workspace tool list adds login guidance only to chrome_read_page', () => {
   const tools = parseSse(augmented.body.toString('utf8')).result.tools;
   assert.deepEqual(tools.map((tool) => tool.name), [
     'chrome_read_page', 'chrome_computer', 'flow.sign-in', 'bmg_show_workspace', 'bmg_hide_workspace',
-    'bmg_unlock', 'approval_status', 'get_approval_status',
+    'bmg_claim_web_unlock', 'bmg_unlock', 'approval_status', 'get_approval_status',
     'request_approval', 'resolve_pending_action',
   ]);
   assert.ok(tools[0].description.startsWith(sourceTools[0].description + '\n'));

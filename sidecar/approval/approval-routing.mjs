@@ -58,11 +58,22 @@ function approvalOutputSchema() {
 export function approvalRouterTools() {
   return [
     {
+      name: 'bmg_claim_web_unlock',
+      description: 'Claim at most one fresh owner-issued full-BMG timed grant after the owner taps Temporarily unlock on their paired BMG webpage (/bmg/unlock). This tool takes no arguments and neither creates a grant nor executes a browser action. Only use when the user explicitly requested BMG; CCM remains the default. If no grant is waiting, ask the owner to use the fixed webpage. Pass the returned approval_id on subsequent BMG browser tool calls. An unclaimed webpage grant expires after five minutes.',
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      execution: { taskSupport: 'forbidden' },
+      inputSchema: {
+        type: 'object', properties: {}, required: [], additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+      },
+      outputSchema: approvalOutputSchema(),
+    },
+    {
       name: 'bmg_unlock',
       description: [
         'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a BMG full-access timed grant.',
         'Use ONLY when the user explicitly asks to use BMG and supplies the current code; CCM is the default for ordinary work.',
-        'Works while local approval mode is totp or either. In either mode, an approval card is an alternative; only one authorization route is needed. The returned approval_id grants access to all public BMG browser tools.',
+        'Works while local approval mode is totp or either. In either mode, an approval card or paired webpage one-tap unlock (/bmg/unlock, then bmg_claim_web_unlock) is an alternative; only one authorization route is needed. The returned approval_id grants access to all public BMG browser tools.',
         'If a user-provided BMG authenticator code is blocked, redacted, or cannot be passed to this tool, do not repeatedly ask for or try to recover it. In either mode, immediately call request_approval with the already-pending browser action approval_id to display the card instead. If there is no pending browser action, first make the intended browser-tool call without approval_id to obtain a pending ID. This does not apply to website login SMS or CAPTCHA codes. In totp-only mode, the card route is unavailable; report that limitation instead.',
         'The authenticator generates a new code every 30 seconds; BMG accepts codes from approximately the last five minutes. A successfully redeemed code cannot be reused. Default grant duration is 21600 seconds (6 hours).',
         'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',

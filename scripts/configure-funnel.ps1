@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = $script:BmgRepoRoot
 $sidecarPort = Get-BmgPort
 $routes = @(
+    "/bmg/unlock",
     "/bmg/mcp",
     "/bmg/authorize",
     "/bmg/token",

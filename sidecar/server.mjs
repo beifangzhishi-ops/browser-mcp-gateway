@@ -59,6 +59,7 @@ const REGISTER_PATH = '/bmg/register';
 const REVOKE_PATH = '/bmg/revoke';
 const CONSENT_PATH = '/bmg/oauth/consent';
 const MCP_PATH = '/bmg/mcp';
+const WEB_UNLOCK_PATH = '/bmg/unlock';
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-authorization-server/bmg',
   '/bmg/.well-known/oauth-authorization-server',
@@ -1012,7 +1013,7 @@ function sendCachedInitialize(response, requestPayload, session) {
         'In timed mode omit approval_id, then call request_approval with the returned ID; ' +
         'the user approval card handles the frozen owner action once. ' +
         'In totp mode ask the user for a six-digit code and call bmg_unlock. ' +
-        'In either mode, request_approval with the returned ID for an approval card, or ask for a phone code and call bmg_unlock; only one is required. ' +
+        'In either mode, request_approval with the returned ID for an approval card, or use a user-provided phone code through bmg_unlock, or have the owner tap Temporarily unlock on the paired /bmg/unlock webpage and then call bmg_claim_web_unlock without arguments. Only one route is required; webpage claim does not dispatch a pending action. ' +
         'An active grant may be reused on BMG browser tools until expiry.',
       ].filter(Boolean).join('\n\n'),
     },
@@ -1553,6 +1554,10 @@ async function handleRequest(request, response, runtime) {
       resource: runtime.config.resource,
       upstream: runtime.config.upstreamUrl,
     });
+    return;
+  }
+  if (url.pathname === WEB_UNLOCK_PATH) {
+    await runtime.approval.webUnlock.handleHttp(request, response, readBody);
     return;
   }
   if (AUTHORIZATION_DISCOVERY_PATHS.has(url.pathname) && request.method === 'GET') {

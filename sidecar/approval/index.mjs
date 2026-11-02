@@ -9,12 +9,13 @@ import { PendingActionManager } from './pending-action-manager.mjs';
 import { TimedGrantManager } from './timed-grant-manager.mjs';
 import { ApprovalReceiptStore } from './approval-receipt-store.mjs';
 import { BmgTotpManager } from './totp.mjs';
+import { WebUnlockManager } from './web-unlock.mjs';
 import { approvalRouterTools, approvalResource, APPROVAL_UI_URI } from './approval-routing.mjs';
 
 const APPROVAL_TOOL_NAMES = new Set(approvalRouterTools().map((tool) => tool.name));
 const UUID_PATTERN = '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$';
-const GRANT_DESCRIPTION = 'Active BMG grant ID. Obtain via an approved card or bmg_unlock with a user-provided phone code, according to local policy. Omit to request a card where supported. Never invent IDs.';
-const GRANT_GUIDANCE = 'If a browser call returns approval_required, call request_approval for its frozen action; the card runs it once if approved. In phone-enabled modes, a user-provided code can instead unlock via bmg_unlock, then retry the browser call with the returned approval_id. Both options work in either mode; only one is needed. In either mode, if the BMG phone-authenticator code is blocked, redacted, or cannot be delivered to bmg_unlock, immediately call request_approval with the pending browser action\'s approval_id to display the card. Do not ask the user to keep resending the blocked code. If there is no pending action ID yet, issue the intended browser call without approval_id to freeze it first. Never fabricate an ID, approve on the user\'s behalf, or replay a card-approved owner action. This fallback is for BMG authorization codes, not website login/CAPTCHA codes.';
+const GRANT_DESCRIPTION = 'Active BMG grant ID. Obtain from an approved card, a user-provided phone code via bmg_unlock, or one owner-issued webpage unlock via bmg_claim_web_unlock. Omit to request a card where supported. Never invent IDs.';
+const GRANT_GUIDANCE = 'If a browser call returns approval_required, call request_approval for its frozen action; the card runs it once if approved. In either mode, the owner can unlock on their paired BMG webpage, then the model calls bmg_claim_web_unlock without arguments to claim one grant; pass that grant ID on subsequent browser calls. In phone-enabled modes, a user-provided code can instead unlock via bmg_unlock. Only one method is needed. In either mode, if a BMG phone-authenticator code is blocked, redacted, or cannot be delivered to bmg_unlock, immediately call request_approval with the pending browser action ID rather than asking the user to resend it. If no pending action exists, issue the intended browser call without approval_id first. Never fabricate an ID, approve on the user\'s behalf, or replay a card-approved owner action. BMG authorization codes are distinct from website login/CAPTCHA codes.';
 
 function grantFields(grant) {
   const active = grant?.grant_state === 'active';
@@ -111,6 +112,13 @@ export class BmgApprovalGate {
     this.grants = new TimedGrantManager({ now });
     this.totp = totpManager || new BmgTotpManager({ root: rootDir, now });
     this.policy = this.policyStore.current();
+    this.webUnlock = new WebUnlockManager({
+      stateFile: path.join(rootDir, '.state', 'bmg-web-browsers.json'),
+      verifyCode: (code) => this.totp.verify(code),
+      grants: this.grants,
+      policy: () => this.currentPolicy(),
+      now,
+    });
   }
 
   currentPolicy() {
@@ -118,6 +126,7 @@ export class BmgApprovalGate {
     if (refreshed.changed) {
       this.grants.clearAll('policy_changed');
       this.pending.clearPendingAll('policy_changed');
+      this.webUnlock.invalidatePending();
     }
     this.policy = refreshed.policy;
     return this.policy;
@@ -197,6 +206,19 @@ export class BmgApprovalGate {
 
   async handleLocal(name, args, hostSession, executeFrozen) {
     this.currentPolicy();
+    if (name === 'bmg_claim_web_unlock') {
+      const grant = this.webUnlock.claim();
+      if (!grant) return result(status({
+        classification: 'web_unlock_not_available',
+        output: 'No new BMG webpage grant is awaiting claim. Ask the owner to tap Temporarily unlock on their paired BMG webpage.',
+      }), { isError: true });
+      return result(status({
+        classification: 'web_unlock_claimed', approval_id: grant.approval_id,
+        grant_scope: 'full_bmg', grant_effect: 'all_public_bmg_browser_tools',
+        ...grantFields(grant),
+        output: 'Owner webpage unlock claimed. Pass this approval_id on BMG browser-tool calls until expiration.',
+      }));
+    }
     if (name === 'approval_status') {
       return result(this.inspection(args.approval_id));
     }

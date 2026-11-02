@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "bmg-common.ps1")
 
 $routes = @(
+    "/bmg/unlock",
     "/bmg/mcp",
     "/bmg/authorize",
     "/bmg/token",
