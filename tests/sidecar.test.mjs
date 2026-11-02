@@ -28,6 +28,7 @@ import {
   patchUpstreamToolsBackgroundText,
 } from '../scripts/patch-extension-upstream-tools.mjs';
 import { toolCallFailed } from '../scripts/bmgctl-result.mjs';
+import { inspectBrowserToolResponse } from '../scripts/check-bmg-live.mjs';
 import { BmgApprovalGate } from '../sidecar/approval/index.mjs';
 import { BmgTotpManager, totpForCounter } from '../sidecar/approval/totp.mjs';
 
@@ -36,6 +37,23 @@ const RESOURCE = 'https://bmg.example.test/bmg/mcp';
 const PROTECTED_METADATA =
   'https://bmg.example.test/.well-known/oauth-protected-resource/bmg/mcp';
 const APPROVAL_SECRET = 'unit-test-approval-secret';
+
+test('live acceptance rejects nested browser errors, malformed results and fallback-only reads', () => {
+  const response = (payload, isError = false) => ({
+    success: true,
+    name: 'chrome_read_page',
+    result: { isError, content: [{ type: 'text', text: JSON.stringify(payload) }] },
+  });
+  const realTree = response({ success: true, pageContent: '- button', fallbackUsed: false });
+  assert.equal(inspectBrowserToolResponse(realTree, { requireAccessibilityTree: true }).passed, true);
+  assert.deepEqual(inspectBrowserToolResponse(response({ success: true, pageContent: '- button', fallbackUsed: true }), {
+    requireAccessibilityTree: true,
+  }), { passed: false, reason: 'accessibility_tree_fallback_only' });
+  assert.equal(inspectBrowserToolResponse(response({ success: false })).passed, false);
+  assert.equal(inspectBrowserToolResponse(response({ success: true }, true)).passed, false);
+  assert.equal(inspectBrowserToolResponse({ success: true, result: { isError: false, content: [{ type: 'text', text: 'not-json' }] } }).passed, false);
+  assert.equal(inspectBrowserToolResponse({ success: false, result: { isError: false } }).passed, false);
+});
 
 test('BMG timed grant freezes its owner action, binds a card, prevents replay and revokes on policy change', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-approval-test-'));
