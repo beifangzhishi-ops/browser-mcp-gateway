@@ -14,7 +14,7 @@ import { approvalRouterTools, approvalResource, APPROVAL_UI_URI } from './approv
 const APPROVAL_TOOL_NAMES = new Set(approvalRouterTools().map((tool) => tool.name));
 const UUID_PATTERN = '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$';
 const GRANT_DESCRIPTION = 'Active BMG grant ID. Obtain via an approved card or bmg_unlock with a user-provided phone code, according to local policy. Omit to request a card where supported. Never invent IDs.';
-const GRANT_GUIDANCE = 'If a browser call returns approval_required, call request_approval for its frozen action; the card runs it once if approved. In phone-enabled modes, a user-provided code can instead unlock via bmg_unlock, then retry the browser call with the returned approval_id. Both options work in either mode; only one is needed.';
+const GRANT_GUIDANCE = 'If a browser call returns approval_required, call request_approval for its frozen action; the card runs it once if approved. In phone-enabled modes, a user-provided code can instead unlock via bmg_unlock, then retry the browser call with the returned approval_id. Both options work in either mode; only one is needed. In either mode, if the BMG phone-authenticator code is blocked, redacted, or cannot be delivered to bmg_unlock, immediately call request_approval with the pending browser action\'s approval_id to display the card. Do not ask the user to keep resending the blocked code. If there is no pending action ID yet, issue the intended browser call without approval_id to freeze it first. Never fabricate an ID, approve on the user\'s behalf, or replay a card-approved owner action. This fallback is for BMG authorization codes, not website login/CAPTCHA codes.';
 
 function grantFields(grant) {
   const active = grant?.grant_state === 'active';
@@ -190,7 +190,7 @@ export class BmgApprovalGate {
       action_state: null,
       action_failed: false,
       output: policy.mode === 'either'
-        ? 'Choose one authorization route: request_approval with this approval_id to show a card that runs the frozen action once if approved, OR ask the user for a phone code, call bmg_unlock, and retry this browser call using its new approval_id. A code does not execute the frozen action. Never rerun an owner action after card approval.'
+        ? 'Choose one authorization route: request_approval with this approval_id to show a card that runs the frozen action once if approved, OR ask the user for a phone code, call bmg_unlock, and retry this browser call using its new approval_id. If the BMG authenticator code is blocked or redacted, directly call request_approval with this approval_id now instead of asking for another code. A code does not execute the frozen action. Never rerun an owner action after card approval.'
         : 'Approval required. Call request_approval with this approval_id and optional duration_seconds. The approval card will execute the frozen action once; do not rerun it.',
     })) };
   }

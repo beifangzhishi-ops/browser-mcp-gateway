@@ -132,6 +132,7 @@ test('BMG either mode accepts a phone code or a card independently and revokes b
   const waiting = gate.authorize('chrome_navigate', { url: 'https://example.org/' });
   assert.equal(waiting.toolResult.structuredContent.classification, 'approval_required');
   assert.match(waiting.toolResult.structuredContent.output, /bmg_unlock/u);
+  assert.match(waiting.toolResult.structuredContent.output, /code is blocked or redacted.*request_approval/u);
   let dispatches = 0;
   const phone = await gate.handleLocal('bmg_unlock', { code: '654321', duration_seconds: 300 });
   assert.equal(phone.structuredContent.classification, 'bmg_unlocked');
@@ -2371,6 +2372,10 @@ test('workspace tool list adds login guidance only to chrome_read_page', () => {
   assert.equal(tools[2].inputSchema.properties.approval_id.type, 'string');
   assert.match(tools[1].description, /request_approval/u);
   assert.match(tools[2].description, /bmg_unlock/u);
+  assert.match(tools[1].description, /code is blocked, redacted.*request_approval/u);
+  assert.match(tools.find((tool) => tool.name === 'bmg_unlock').description, /immediately call request_approval/u);
+  assert.match(tools.find((tool) => tool.name === 'bmg_unlock').description, /totp-only mode, the card route is unavailable/u);
+  assert.match(tools.find((tool) => tool.name === 'request_approval').description, /code is blocked or unavailable/u);
   assert.deepEqual(sourceTools[0].description, 'Read visible page elements');
   assert.equal(augmented.headers['content-length'], undefined);
   assert.equal(augmentWorkspaceToolsForTest({ ...response, statusCode: 502 }, true).statusCode, 502);

@@ -63,6 +63,7 @@ export function approvalRouterTools() {
         'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a BMG full-access timed grant.',
         'Use ONLY when the user explicitly asks to use BMG and supplies the current code; CCM is the default for ordinary work.',
         'Works while local approval mode is totp or either. In either mode, an approval card is an alternative; only one authorization route is needed. The returned approval_id grants access to all public BMG browser tools.',
+        'If a user-provided BMG authenticator code is blocked, redacted, or cannot be passed to this tool, do not repeatedly ask for or try to recover it. In either mode, immediately call request_approval with the already-pending browser action approval_id to display the card instead. If there is no pending browser action, first make the intended browser-tool call without approval_id to obtain a pending ID. This does not apply to website login SMS or CAPTCHA codes. In totp-only mode, the card route is unavailable; report that limitation instead.',
         'The authenticator generates a new code every 30 seconds; BMG accepts codes from approximately the last five minutes. A successfully redeemed code cannot be reused. Default grant duration is 21600 seconds (6 hours).',
         'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',
       ].join('\n\n'),
@@ -132,6 +133,7 @@ export function approvalRouterTools() {
       name: 'request_approval',
       description: [
         'Render the BMG approval card for one already-frozen pending action.',
+        'In either mode, if a BMG phone-authenticator code is blocked or unavailable, call this tool immediately using the pending browser-action approval_id instead of retrying the code. It only renders the approval card; the user must approve it. Do not invent an ID or retry a consumed owner action.',
         'Pass the approval_id plus an optional duration_seconds.',
         'If duration_seconds is omitted, the requested duration is 21600 seconds (6 hours).',
         'Common values: 60=1 minute, 300=5 minutes, 1800=30 minutes, 3600=1 hour, 21600=6 hours, 86400=1 day, 604800=7 days.',
