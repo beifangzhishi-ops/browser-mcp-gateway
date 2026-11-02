@@ -234,7 +234,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         else message = "Approved. The owner action was handled.";
         if (value.result_unavailable) message += " Archived decision; owner action output is unavailable.";
         if (value.grant_active) message += " Timed BMG access is currently active.";
-        if (unverified) message += " Saved card state; server verification unavailable.";
+        if (unverified) message += " Saved card state; live verification through this card is unavailable. No action will be retried.";
         return message;
       }
 

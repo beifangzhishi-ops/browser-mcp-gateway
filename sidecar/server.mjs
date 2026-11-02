@@ -874,6 +874,9 @@ async function executeApprovedBrowserTool(runtime, name, args, headers, url) {
         : await runtime.workspace.hideWorkspace();
       return { content: [{ type: 'text', text: JSON.stringify({ success: true, ...data }) }] };
     } catch (error) {
+      runtime.diagnostics.record('approved_owner_tool_failed', {
+        route: 'workspace_local', failure_kind: 'tool_result_error',
+      });
       return {
         content: [{ type: 'text', text: String(error?.message || error) }],
         isError: true,
@@ -906,7 +909,16 @@ async function executeApprovedBrowserTool(runtime, name, args, headers, url) {
     await runtime.workspace.settleToolCall(payload, message);
   }
   if (upstreamResponse.statusCode !== 200 || !message?.result) {
+    runtime.diagnostics.record('approved_owner_tool_failed', {
+      route: 'upstream', failure_kind: 'invalid_response',
+      http_status: upstreamResponse.statusCode,
+    });
     throw new UpstreamHttpError('Approved browser call did not return a usable result.', upstreamResponse);
+  }
+  if (message.result.isError === true) {
+    runtime.diagnostics.record('approved_owner_tool_failed', {
+      route: 'upstream', failure_kind: 'tool_result_error',
+    });
   }
   return message.result;
 }

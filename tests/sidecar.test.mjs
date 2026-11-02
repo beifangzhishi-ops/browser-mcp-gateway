@@ -165,6 +165,7 @@ test('BMG either mode accepts a phone code or a card independently and revokes b
 test('public BMG MCP cannot dispatch browser calls before approval and strips the grant on reuse', async (t) => {
   const fixture = await createTestRuntime({
     approvalMode: 'either',
+    includeFailureTool: true,
     totpManager: { verify: (code) => code === '654321' },
   });
   t.after(async () => {
@@ -238,6 +239,30 @@ test('public BMG MCP cannot dispatch browser calls before approval and strips th
   });
   assert.equal(phoneReused.content[0].text, 'pong from 12306');
   assert.deepEqual(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').at(-1).payload.params.arguments, {});
+  const frozenFailure = await call('tools/call', { name: 'safe_fail', arguments: {} });
+  assert.equal(frozenFailure.structuredContent.classification, 'approval_required');
+  const failedId = frozenFailure.structuredContent.approval_id;
+  const failureCard = await call('tools/call', {
+    name: 'request_approval', arguments: { approval_id: failedId, duration_seconds: 60 },
+  });
+  const failedApproval = await call('tools/call', {
+    name: 'resolve_pending_action',
+    arguments: {
+      approval_id: failedId, approval_nonce: failureCard._meta.approval_nonce, decision: 'approve',
+    },
+  });
+  assert.equal(failedApproval.structuredContent.state, 'consumed');
+  assert.equal(failedApproval.structuredContent.action_failed, true);
+  assert.equal(failedApproval.structuredContent.grant_active, true);
+  const failureLog = fs.readFileSync(path.join(fixture.rootDir, 'logs', 'bmg-upstream-diagnostics.jsonl'), 'utf8');
+  assert.match(failureLog, /"event":"approved_owner_tool_failed","route":"upstream","failure_kind":"tool_result_error"/u);
+  assert.doesNotMatch(failureLog, /private-content-must-not-be-logged/u);
+  const readFailedApproval = await call('tools/call', {
+    name: 'get_approval_status',
+    arguments: { approval_id: failedId, approval_nonce: failureCard._meta.approval_nonce },
+  });
+  assert.equal(readFailedApproval.structuredContent.action_failed, true);
+  assert.equal(readFailedApproval.structuredContent.state, 'consumed');
 });
 
 test('passive upstream diagnostics record transitions, safe failure codes and process evidence', async (t) => {
@@ -532,7 +557,7 @@ function collectRequestBody(request) {
   });
 }
 
-async function createFakeUpstream({ initializeDelayMs = 0 } = {}) {
+async function createFakeUpstream({ initializeDelayMs = 0, includeFailureTool = false } = {}) {
   const calls = [];
   const server = http.createServer(async (request, response) => {
     const body = await collectRequestBody(request);
@@ -576,12 +601,21 @@ async function createFakeUpstream({ initializeDelayMs = 0 } = {}) {
             description: 'A no-side-effect test tool',
             inputSchema: { type: 'object', properties: {} },
           },
+          ...(includeFailureTool ? [{
+            name: 'safe_fail', description: 'A test tool that returns a tool error',
+            inputSchema: { type: 'object', properties: {} },
+          }] : []),
         ],
       };
     } else if (method === 'tools/call' && payload.params?.name === 'safe_ping') {
       result = {
         content: [{ type: 'text', text: 'pong from 12306' }],
         isError: false,
+      };
+    } else if (includeFailureTool && method === 'tools/call' && payload.params?.name === 'safe_fail') {
+      result = {
+        content: [{ type: 'text', text: 'private-content-must-not-be-logged' }],
+        isError: true,
       };
     } else {
       response.statusCode = 400;

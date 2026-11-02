@@ -26,6 +26,8 @@ One approved approval_id authorizes **all public BMG browser tools** for a limit
 
 The MCP App card lives at ui://bmg/approval-v2.html. Card-specific hidden nonce verification, optional Host-session binding, and live state revalidation on remount prevent a reopened card from dispatching a past action. Card continuation never reruns an approved owner call. Public tools: bmg_unlock, approval_status, request_approval, and app-only get_approval_status / resolve_pending_action. Each exposed browser tool accepts an optional Router-only approval_id.
 
+When an approved owner call returns an upstream tool error, the approval is still consumed and its time-limited grant remains usable; check it through `approval_status` and issue a separate new browser call only if needed. The original frozen action is never replayed. The Sidecar writes `approved_owner_tool_failed` events to `logs/bmg-upstream-diagnostics.jsonl` with a fixed failure kind and route (and HTTP status for invalid upstream responses), without retaining tool arguments, browser output, URLs, or error messages. An archived approval card or its saved widget snapshot is not an authoritative live status check; the card explicitly indicates when embedded live verification is unavailable, which does not by itself imply Sidecar downtime.
+
 ### Phone pairing (private 6v terminal only)
 
 Use a SHA-1 phone TOTP app with six-digit 30-second codes. Under the Windows account that runs BMG, run the following **yourself** in a private local terminal. Never run Init or ReadForRouter through model-controlled tools or paste the setup key into ChatGPT.
