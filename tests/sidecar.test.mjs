@@ -113,8 +113,60 @@ test('BMG TOTP checks the WCM-equivalent clock window and prevents replay', (t) 
   assert.equal(fs.readFileSync(file, 'utf8').includes(secret.toString('base64')), false);
 });
 
+test('BMG either mode accepts a phone code or a card independently and revokes both on policy change', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-either-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'config'));
+  const policyFile = path.join(root, 'config', 'approval-policy.json');
+  fs.writeFileSync(policyFile, JSON.stringify({ version: 1, mode: 'either', revision: 0 }));
+  const redeemed = new Set();
+  const gate = new BmgApprovalGate({
+    rootDir: root, logDir: root,
+    totpManager: { verify: (code) => {
+      if (code !== '654321' || redeemed.has(code)) return false;
+      redeemed.add(code);
+      return true;
+    } },
+  });
+
+  const waiting = gate.authorize('chrome_navigate', { url: 'https://example.org/' });
+  assert.equal(waiting.toolResult.structuredContent.classification, 'approval_required');
+  assert.match(waiting.toolResult.structuredContent.output, /bmg_unlock/u);
+  let dispatches = 0;
+  const phone = await gate.handleLocal('bmg_unlock', { code: '654321', duration_seconds: 300 });
+  assert.equal(phone.structuredContent.classification, 'bmg_unlocked');
+  assert.equal(phone.structuredContent.grant_active, true);
+  assert.equal(gate.authorize('chrome_read_page', { approval_id: phone.structuredContent.approval_id }).allowed, true);
+  assert.equal(dispatches, 0, 'Phone unlock must not dispatch the pending browser action');
+  const repeatedCode = await gate.handleLocal('bmg_unlock', { code: '654321' });
+  assert.equal(repeatedCode.isError, true);
+
+  const card = await gate.handleLocal('request_approval', {
+    approval_id: waiting.toolResult.structuredContent.approval_id, duration_seconds: 60,
+  }, 'session-either');
+  assert.equal(card.structuredContent.state, 'pending');
+  const approved = await gate.handleLocal('resolve_pending_action', {
+    approval_id: card.structuredContent.approval_id,
+    approval_nonce: card._meta.approval_nonce, decision: 'approve',
+  }, 'session-either', async () => {
+    dispatches++;
+    return { content: [{ type: 'text', text: 'navigated' }] };
+  });
+  assert.equal(approved.structuredContent.grant_active, true);
+  assert.equal(dispatches, 1);
+  assert.equal(gate.authorize('chrome_read_page', { approval_id: approved.structuredContent.approval_id }).allowed, true);
+  assert.notEqual(phone.structuredContent.approval_id, approved.structuredContent.approval_id);
+
+  fs.writeFileSync(policyFile, JSON.stringify({ version: 1, mode: 'either', revision: 1 }));
+  assert.equal(gate.authorize('chrome_read_page', { approval_id: phone.structuredContent.approval_id }).allowed, false);
+  assert.equal(gate.authorize('chrome_read_page', { approval_id: approved.structuredContent.approval_id }).allowed, false);
+});
+
 test('public BMG MCP cannot dispatch browser calls before approval and strips the grant on reuse', async (t) => {
-  const fixture = await createTestRuntime({ approvalMode: 'timed' });
+  const fixture = await createTestRuntime({
+    approvalMode: 'either',
+    totpManager: { verify: (code) => code === '654321' },
+  });
   t.after(async () => {
     await closeBmgServer(fixture.runtime);
     await fixture.fakeUpstream.close();
@@ -177,6 +229,15 @@ test('public BMG MCP cannot dispatch browser calls before approval and strips th
   });
   assert.equal(repeated.isError, true);
   assert.equal(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').length, 2);
+  const phone = await call('tools/call', {
+    name: 'bmg_unlock', arguments: { code: '654321', duration_seconds: 60 },
+  });
+  assert.equal(phone.structuredContent.classification, 'bmg_unlocked');
+  const phoneReused = await call('tools/call', {
+    name: 'safe_ping', arguments: { approval_id: phone.structuredContent.approval_id },
+  });
+  assert.equal(phoneReused.content[0].text, 'pong from 12306');
+  assert.deepEqual(fixture.fakeUpstream.calls.filter((item) => item.payload?.method === 'tools/call').at(-1).payload.params.arguments, {});
 });
 
 test('passive upstream diagnostics record transitions, safe failure codes and process evidence', async (t) => {

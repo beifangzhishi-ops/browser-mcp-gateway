@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet('Timed','Totp','Off')]
+  [ValidateSet('Timed','Totp','Either','Off')]
   [string]$Mode,
   [switch]$Status,
   [switch]$RevokeAll
@@ -18,7 +18,7 @@ function Read-Policy {
   try {
     $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     if ($value.version -ne 1) { throw 'version must be 1' }
-    if ($value.mode -notin @('timed','totp','off')) { throw 'mode must be timed, totp or off' }
+    if ($value.mode -notin @('timed','totp','either','off')) { throw 'mode must be timed, totp, either or off' }
     $revision = [int64]$value.revision
     if ($revision -lt 0) { throw 'revision must be non-negative' }
     return [ordered]@{ version = 1; mode = [string]$value.mode; revision = $revision }

@@ -13,8 +13,8 @@ import { approvalRouterTools, approvalResource, APPROVAL_UI_URI } from './approv
 
 const APPROVAL_TOOL_NAMES = new Set(approvalRouterTools().map((tool) => tool.name));
 const UUID_PATTERN = '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$';
-const GRANT_DESCRIPTION = 'Active BMG grant ID. Timed: omit to request approval. TOTP: obtain via bmg_unlock using a user-provided code. Never invent IDs.';
-const GRANT_GUIDANCE = 'If BMG requires approval, call request_approval with the returned ID. TOTP uses bmg_unlock with a user code. The card executes the frozen action once.';
+const GRANT_DESCRIPTION = 'Active BMG grant ID. Obtain via an approved card or bmg_unlock with a user-provided phone code, according to local policy. Omit to request a card where supported. Never invent IDs.';
+const GRANT_GUIDANCE = 'If a browser call returns approval_required, call request_approval for its frozen action; the card runs it once if approved. In phone-enabled modes, a user-provided code can instead unlock via bmg_unlock, then retry the browser call with the returned approval_id. Both options work in either mode; only one is needed.';
 
 function grantFields(grant) {
   const active = grant?.grant_state === 'active';
@@ -189,7 +189,9 @@ export class BmgApprovalGate {
       ...grantFields(null),
       action_state: null,
       action_failed: false,
-      output: 'Approval required. Call request_approval with this approval_id and optional duration_seconds. The approval card will execute the frozen action once; do not rerun it.',
+      output: policy.mode === 'either'
+        ? 'Choose one authorization route: request_approval with this approval_id to show a card that runs the frozen action once if approved, OR ask the user for a phone code, call bmg_unlock, and retry this browser call using its new approval_id. A code does not execute the frozen action. Never rerun an owner action after card approval.'
+        : 'Approval required. Call request_approval with this approval_id and optional duration_seconds. The approval card will execute the frozen action once; do not rerun it.',
     })) };
   }
 
@@ -199,8 +201,8 @@ export class BmgApprovalGate {
       return result(this.inspection(args.approval_id));
     }
     if (name === 'bmg_unlock') {
-      if (this.policy.mode !== 'totp') {
-        return result(status({ classification: 'bmg_unlock_unavailable', output: 'BMG is not in totp mode.' }), { isError: true });
+      if (this.policy.mode !== 'totp' && this.policy.mode !== 'either') {
+        return result(status({ classification: 'bmg_unlock_unavailable', output: 'BMG phone-code approval is not enabled.' }), { isError: true });
       }
       try {
         const duration = validateApprovalDurationSeconds(args.duration_seconds);
@@ -239,7 +241,7 @@ export class BmgApprovalGate {
     }
     if (name === 'request_approval') {
       try {
-        if (this.policy.mode !== 'timed') throw new Error('BMG is not in timed approval mode.');
+        if (this.policy.mode !== 'timed' && this.policy.mode !== 'either') throw new Error('BMG approval cards are not enabled.');
         const duration = validateApprovalDurationSeconds(args.duration_seconds);
         const prepared = this.pending.prepareAppApproval(args.approval_id, {
           hostSession, requestedDurationSeconds: duration,
@@ -277,7 +279,7 @@ export class BmgApprovalGate {
           output: 'The user denied the frozen BMG action. It was not dispatched.',
         }));
       }
-      if (args.decision !== 'approve' || this.policy.mode !== 'timed') {
+      if (args.decision !== 'approve' || (this.policy.mode !== 'timed' && this.policy.mode !== 'either')) {
         throw new Error('Approval decision or mode is invalid.');
       }
       const claimed = this.pending.claim(args.approval_id, args.approval_nonce, hostSession);

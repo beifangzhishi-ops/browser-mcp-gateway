@@ -996,10 +996,11 @@ function sendCachedInitialize(response, requestPayload, session) {
       instructions: [
         upstream.result.instructions || '',
         'Prefer CCM for ordinary work; use BMG only when the user explicitly requests it. ' +
-        'BMG browser-tool calls require a timed approval_id unless approval mode is off. ' +
+        'BMG browser-tool calls require an active approval_id unless approval mode is off. ' +
         'In timed mode omit approval_id, then call request_approval with the returned ID; ' +
         'the user approval card handles the frozen owner action once. ' +
         'In totp mode ask the user for a six-digit code and call bmg_unlock. ' +
+        'In either mode, request_approval with the returned ID for an approval card, or ask for a phone code and call bmg_unlock; only one is required. ' +
         'An active grant may be reused on BMG browser tools until expiry.',
       ].filter(Boolean).join('\n\n'),
     },

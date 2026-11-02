@@ -32,8 +32,8 @@ function parsePolicyText(text) {
   if (parsed.version !== 1) {
     throw new Error('approval policy version must be 1.');
   }
-  if (!['timed', 'totp', 'off'].includes(parsed.mode)) {
-    throw new Error('approval policy mode must be timed, totp or off.');
+  if (!['timed', 'totp', 'either', 'off'].includes(parsed.mode)) {
+    throw new Error('approval policy mode must be timed, totp, either or off.');
   }
   if (!Number.isInteger(parsed.revision) || parsed.revision < 0) {
     throw new Error('approval policy revision must be a non-negative integer.');

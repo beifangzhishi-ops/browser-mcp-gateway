@@ -62,7 +62,7 @@ export function approvalRouterTools() {
       description: [
         'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a BMG full-access timed grant.',
         'Use ONLY when the user explicitly asks to use BMG and supplies the current code; CCM is the default for ordinary work.',
-        'Works only while local approval mode is totp. The returned approval_id grants access to all public BMG browser tools.',
+        'Works while local approval mode is totp or either. In either mode, an approval card is an alternative; only one authorization route is needed. The returned approval_id grants access to all public BMG browser tools.',
         'The authenticator generates a new code every 30 seconds; BMG accepts codes from approximately the last five minutes. A successfully redeemed code cannot be reused. Default grant duration is 21600 seconds (6 hours).',
         'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',
       ].join('\n\n'),

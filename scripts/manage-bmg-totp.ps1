@@ -101,14 +101,14 @@ switch ($Action) {
     Write-Output ('Manual setup key: ' + $base32)
     Write-Output ('OTP URI: otpauth://totp/BMG:6v?secret=' + $base32 + '&issuer=BMG&algorithm=SHA1&digits=6&period=30')
     Write-Output 'Add this key to a TOTP app as SHA1 / 6 digits / 30 seconds.'
-    Write-Output 'Next, run Confirm with one code shown by the app. That switches BMG to TOTP mode.'
+    Write-Output 'Next, run Confirm with one code shown by the app. That enables both phone and card approval.'
     Write-Output 'Do not paste this setup key or OTP URI into ChatGPT.'
     break
   }
   'Confirm' {
     if (-not (Test-Code (Get-Secret) $Code)) { throw 'Invalid authenticator code; BMG approval mode was not changed.' }
-    & $policyScript -Mode Totp
-    Write-Output 'Phone paired and BMG switched to TOTP approval mode. Existing timed grants are revoked by the policy revision.'
+    & $policyScript -Mode Either
+    Write-Output 'Phone paired; BMG permits either phone codes or approval cards. Existing grants are revoked by the policy revision if the mode changed.'
     break
   }
   'ReadForRouter' {

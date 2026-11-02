@@ -19,9 +19,10 @@ BMG adopts the already accepted WCM approval state model with BMG browser-wide s
 | --- | --- |
 | timed (default) | An unapproved browser call freezes its tool name and arguments. request_approval binds a user approval card; approval dispatches the frozen owner call once. |
 | totp | Without a live approval_id calls fail closed. A user-provided six-digit phone code is redeemed through bmg_unlock. |
+| either (recommended after pairing) | The user may approve the frozen browser action through a card, or provide a six-digit phone code through bmg_unlock and then retry the browser tool using the new approval_id. Only one method is needed. |
 | off | No extra BMG approval is needed for public browser calls; OAuth remains mandatory. |
 
-One approved approval_id authorizes **all public BMG browser tools** for a limited time (6 hours by default, configurable from 60 seconds to 7 days), not just the owner call. Several IDs may be active independently. An unbound request expires after 15 minutes. A bound card has a separate 72-hour decision window; the grant starts only when approved. Changing policy revision revokes pending actions and all grants. Grants and pending actions are memory-only and vanish on Sidecar restart. Bounded archived decision receipts persist 90 days for display only.
+One approved approval_id authorizes **all public BMG browser tools** for a limited time (6 hours by default, configurable from 60 seconds to 7 days), not just the owner call. Several IDs may be active independently. In either mode, a phone-code grant never runs an outstanding frozen action: after unlocking, retry that browser action explicitly with the new approval_id. A card-approved frozen action runs once and must not be retried. An unbound request expires after 15 minutes. A bound card has a separate 72-hour decision window; the grant starts only when approved. Changing policy revision revokes pending actions and all grants. Grants and pending actions are memory-only and vanish on Sidecar restart. Bounded archived decision receipts persist 90 days for display only.
 
 The MCP App card lives at ui://bmg/approval-v2.html. Card-specific hidden nonce verification, optional Host-session binding, and live state revalidation on remount prevent a reopened card from dispatching a past action. Card continuation never reruns an approved owner call. Public tools: bmg_unlock, approval_status, request_approval, and app-only get_approval_status / resolve_pending_action. Each exposed browser tool accepts an optional Router-only approval_id.
 
@@ -34,17 +35,17 @@ Use a SHA-1 phone TOTP app with six-digit 30-second codes. Under the Windows acc
 & 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\manage-bmg-totp.ps1' -Action Confirm -Code '123456'
 ```
 
-Replace the sample code with a live phone code. Confirm switches BMG to totp, revoking previous grants. The permanent 20-byte seed is encrypted using DPAPI CurrentUser outside Git at %LOCALAPPDATA%\BMG\secrets\totp.dpapi. Each code can unlock only once; the accepted clock window matches the WCM five-minute lookback plus one future step, with temporary lockout after repeated failures.
+Replace the sample code with a live phone code. Confirm switches BMG to either mode, revoking previous grants if the policy changes. The permanent 20-byte seed is encrypted using DPAPI CurrentUser outside Git at %LOCALAPPDATA%\BMG\secrets\totp.dpapi. Each code can unlock only once; the accepted clock window matches the WCM five-minute lookback plus one future step, with temporary lockout after repeated failures.
 
 Private terminal policy management:
 
 ```powershell
 & 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -Status
-& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -Mode Timed
+& 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -Mode Either
 & 'C:\Users\Songjx\Documents\ChatGPT\browser-mcp-gateway\scripts\set-bmg-approval-mode.ps1' -RevokeAll
 ```
 
-The policy file config/approval-policy.json is ignored by Git and monitored by the Sidecar. Before phone pairing, keep timed mode; do not automatically enable totp. After upgrading, **rebuild/reconnect the ChatGPT BMG plugin/app** because public tool schemas and MCP App resources changed. The user-only URL and OAuth key print block is in the plugin/app rebuild section below.
+The policy file config/approval-policy.json is ignored by Git and monitored by the Sidecar. Before phone pairing, keep timed mode; never enable phone-code authorization without local pairing. With a paired phone, choose either mode. Policy changes are loaded on the next approval call and revoke all grants. When public tool descriptions change, **refresh the ChatGPT BMG plugin/app schema**; rebuild/reconnect if a refresh is unavailable. The user-only URL and OAuth key print block is in the plugin/app rebuild section below.
 
 ## BMG OAuth sidecar
 
@@ -386,9 +387,9 @@ Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's 
 
 ### Upstream parity validation (2026-10-01)
 
-The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 46/46.
+The `mcp-chrome-bridge@1.0.31` package layout and CLI were verified against a workspace-local install, including `dist/run_host.bat`, the `register` / `fix-permissions` / `update-port` commands, and the new `doctor` / `report` commands. Its bundled `chrome-mcp-shared@1.0.2` exposes 27 static public tools, and BMG's E2E catalog check now requires all 27 plus the two BMG workspace controls. The pinned extension release was rebuilt from the verified archive and all four BMG patchers were applied; the generated `background.js` passes `node --check`. CCM trusted-node tests pass 49/49.
 
-The Controller runs the pinned mcp-chrome-bridge@1.0.31 / chrome-mcp-shared@1.0.2 upstream. The public BMG catalog has 27 upstream static tools, two BMG workspace controls, and five BMG approval tools (34 static tools plus discovered dynamic flow tools). The trusted CCM Node suite passes 46/46, covering OAuth, workspace ownership, timed approval, app card identity, TOTP and grant reuse. The browser approval mode defaults to timed until the user pairs a phone locally.
+The Controller runs the pinned mcp-chrome-bridge@1.0.31 / chrome-mcp-shared@1.0.2 upstream. The public BMG catalog has 27 upstream static tools, two BMG workspace controls, and five BMG approval tools (34 static tools plus discovered dynamic flow tools). The trusted CCM Node suite passes 49/49, covering OAuth, workspace ownership, approval cards, phone codes, the combined either mode and grant reuse. The browser approval mode defaults to timed until phone pairing, when Confirm selects either mode.
 
 The upstream project exposes powerful browser capabilities. BMG therefore keeps the upstream listener local and requires the sidecar OAuth layer before forwarding any MCP request.
 

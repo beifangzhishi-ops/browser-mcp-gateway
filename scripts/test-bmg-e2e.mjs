@@ -254,8 +254,8 @@ async function runRound(round, approvalSecret) {
   requireStatus(safeTool, 200);
   const safeToolResult = parseSse(safeTool.text).result;
   if (!safeToolResult) throw new Error('Browser tool returned no result.');
-  if (mode === 'timed' && safeToolResult.structuredContent?.classification !== 'approval_required') {
-    throw new Error('Timed approval did not freeze the read-only browser call.');
+  if (['timed', 'either'].includes(mode) && safeToolResult.structuredContent?.classification !== 'approval_required') {
+    throw new Error('Card-enabled approval did not freeze the read-only browser call.');
   }
   if (mode === 'totp' && (
     safeToolResult.structuredContent?.classification !== 'bmg_code_required' ||
