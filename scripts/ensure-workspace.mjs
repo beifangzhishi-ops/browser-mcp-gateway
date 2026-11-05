@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { loadConfig } from '../sidecar/config.mjs';
+import { WORKSPACE_RECOVERY_TIMEOUT_MS } from '../sidecar/workspace.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -61,7 +62,7 @@ async function main() {
           '-File', path.join(rootDir, 'scripts', 'ensure-edge.ps1'),
           '-Port', String(config.port),
           '-BootstrapStateFile', path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
-        ], { windowsHide: true, timeout: 15000 });
+        ], { windowsHide: true, timeout: WORKSPACE_RECOVERY_TIMEOUT_MS });
       },
     });
   } catch (error) {

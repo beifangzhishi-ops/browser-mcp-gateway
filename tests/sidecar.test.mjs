@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, augmentWorkspaceToolsForTest } from '../sidecar/server.mjs';
 import { UpstreamDiagnostics, probeTcpPort } from '../sidecar/upstream-diagnostics.mjs';
 import { createConfig } from '../sidecar/config.mjs';
-import { BrowserWorkspaceRouter } from '../sidecar/workspace.mjs';
+import { BrowserWorkspaceRouter, WORKSPACE_RECOVERY_TIMEOUT_MS } from '../sidecar/workspace.mjs';
 import { prepareWorkspace } from '../scripts/ensure-workspace.mjs';
 import { execFileSync } from 'node:child_process';
 import { OAuthStore, createPkceChallenge } from '../sidecar/oauth.mjs';
@@ -2015,28 +2015,62 @@ test('workspace router creates one background window and pins page tools to it',
   assert.equal(rewrittenFlow.params.arguments.__bmg_workspace_tab_id, 7002);
 });
 
-test('workspace router narrows close-tabs to the GPT tab', async (t) => {
+test('workspace router refuses external close-tabs without touching any tab or workspace', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-close-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  let browserCalls = 0;
   const router = new BrowserWorkspaceRouter({
     enabled: true,
     stateFile: path.join(rootDir, 'workspace.json'),
     bootstrapUrl: 'http://localhost:12307/workspace-bootstrap',
     claimWindow: async () => ({ hwnd: 8103 }),
-    callTool: async () =>
-      workspaceToolMessage({ success: true, windowId: 8101, tabs: [{ tabId: 8102 }] }),
-  });
-  const rewritten = await router.rewrite({
-    jsonrpc: '2.0',
-    id: 3,
-    method: 'tools/call',
-    params: {
-      name: 'chrome_close_tabs',
-      arguments: { tabIds: [9999], url: 'https://user-window.example/' },
+    callTool: async () => {
+      browserCalls += 1;
+      return workspaceToolMessage({ success: true, windowId: 8101, tabs: [{ tabId: 8102 }] });
     },
   });
-  assert.deepEqual(rewritten.params.arguments.tabIds, [8102]);
-  assert.equal('url' in rewritten.params.arguments, false);
+  for (const args of [
+    {}, { tabIds: [8102] }, { tabIds: [9999], url: 'https://user-window.example/' },
+  ]) {
+    await assert.rejects(() => router.rewrite({
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'chrome_close_tabs', arguments: args },
+    }), /workspace tab is protected from closing/u);
+  }
+  assert.equal(browserCalls, 0);
+  assert.equal(router.windowId, null);
+  assert.equal(router.tabId, null);
+  const stateFile = path.join(rootDir, 'workspace.json');
+  fs.writeFileSync(stateFile, JSON.stringify({
+    version: 2, windowId: 8101, tabId: 8102,
+    hwnd: 8103, windowMarker: 8104, visible: false,
+  }));
+  const persisted = new BrowserWorkspaceRouter({
+    enabled: true, stateFile,
+    callTool: async () => { browserCalls += 1; },
+  });
+  await assert.rejects(() => persisted.rewrite({
+    method: 'tools/call',
+    params: { name: 'chrome_close_tabs', arguments: { tabIds: [8102] } },
+  }), /workspace tab is protected from closing/u);
+  assert.equal(browserCalls, 0);
+  assert.equal(persisted.windowId, 8101);
+  assert.equal(persisted.tabId, 8102);
+  assert.equal(fs.existsSync(stateFile), true);
+});
+
+test('automatic workspace recovery gives the Edge bootstrap and claim helpers 60 seconds', () => {
+  assert.equal(WORKSPACE_RECOVERY_TIMEOUT_MS, 60_000);
+  const server = readTextFile('sidecar/server.mjs');
+  const start = readTextFile('scripts/ensure-workspace.mjs');
+  const claim = server.split('async function claimWorkspaceWindow(')[1]
+    .split('async function inspectWorkspaceWindow(')[0];
+  const recover = server.split('async function ensureWorkspaceBrowser(')[1]
+    .split('function sendWorkspaceBootstrap(')[0];
+  assert.match(claim, /'-TimeoutMs', '30000'/u);
+  assert.match(claim, /timeout: WORKSPACE_RECOVERY_TIMEOUT_MS/u);
+  assert.match(recover, /timeout: WORKSPACE_RECOVERY_TIMEOUT_MS/u);
+  assert.match(start, /timeout: WORKSPACE_RECOVERY_TIMEOUT_MS/u);
 });
 
 

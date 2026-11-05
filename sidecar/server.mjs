@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadConfig } from './config.mjs';
-import { BrowserWorkspaceRouter } from './workspace.mjs';
+import { BrowserWorkspaceRouter, WORKSPACE_RECOVERY_TIMEOUT_MS } from './workspace.mjs';
 import { UpstreamDiagnostics } from './upstream-diagnostics.mjs';
 import {
   BmgApprovalGate,
@@ -614,8 +614,9 @@ async function claimWorkspaceWindow(rootDir, nonce, marker) {
     [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
       '-Nonce', nonce, '-WindowMarker', String(marker),
+      '-TimeoutMs', '30000',
     ],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
+    { cwd: rootDir, windowsHide: true, timeout: WORKSPACE_RECOVERY_TIMEOUT_MS },
   );
   return parseWindowHelperResult(result.stdout);
 }
@@ -681,7 +682,7 @@ async function ensureWorkspaceBrowser(rootDir, port, startupStateFile) {
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
       '-Port', String(port), '-BootstrapStateFile', startupStateFile,
     ],
-    { cwd: rootDir, windowsHide: true, timeout: 15000 },
+    { cwd: rootDir, windowsHide: true, timeout: WORKSPACE_RECOVERY_TIMEOUT_MS },
   );
   for (const line of String(result.stdout || '').split(/\r?\n/u)) {
     if (line.startsWith('BMG bootstrap action=')) console.log(line);

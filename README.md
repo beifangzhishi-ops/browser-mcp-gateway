@@ -365,6 +365,12 @@ This checks Node/npm, the installed bridge, Edge Native Messaging registration, 
 
 ## GPT dedicated browser workspace
 
+### Recovery timeout and managed tab protection (2026-11-05)
+
+The Edge bootstrap subprocess and the owned-window claim subprocess each have a **60-second** process execution timeout. Claiming a new HWND allows up to **30 seconds** for the nonce-marked window to appear; ordinary inspect/show/hide helper timeouts are unchanged. Startup recovery uses the same 60-second bootstrap subprocess limit. A recovery attempt may involve multiple sequential operations, so 60 seconds is a **per-subprocess budget**, not a guarantee that the entire recovery cycle completes in 60 seconds.
+
+In workspace mode, public `chrome_close_tabs` requests are **rejected before browser dispatch**, regardless of their supplied tab IDs or URL. This preserves the managed workspace anchor tab and prevents a page-cleanup action from closing the only Edge window supporting the bridge. Pause video playback with a targeted page action, or navigate the managed tab to another page instead; the existing internal idle cleanup may still close verified extra tabs while retaining the anchor. No Edge extension rebuild or public MCP schema change is required.
+
 ### Upstream disconnection diagnostics (2026-11-02)
 
 The BMG Sidecar writes `logs/bmg-upstream-diagnostics.jsonl` to help investigate why the browser bridge on local port 12306 becomes unavailable while the OAuth Sidecar on 18007 remains healthy. After Sidecar startup, a passive TCP-connect probe runs every 30 seconds; it neither executes browser tools nor launches Edge. `monitor_started` and `monitor_stopped` mark Sidecar lifecycle. `upstream_state_changed` is written on the first observation and on later up/down transitions (including the previous state and duration). On Windows a transition also captures machine-wide `msedge.exe` and `node.exe` PID/count snapshots when permitted; these are contextual evidence **not proof** of native-host ownership or an exit reason. Failed process inspection is reported with a code and does not interrupt monitoring.
@@ -399,7 +405,7 @@ Non-activating display uses Windows `SW_SHOWNA (8)` to preserve the workspace's 
 
 本机控制命令对应 `bmgctl show`（只显示）和 `bmgctl show --activate`（请求前台）。页面自动化默认保持后台；显式传入 `background:false` 的页面工具及人工选取元素操作会请求前台。以上操作只针对归属已验证的 BMG 工作区窗口。
 
-在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，`chrome_close_tabs` 也会被收窄到工作区标签页，避免默认选中普通前台 Edge 窗口。页面工具的 `background` 语义为后台优先：调用方未指定时按 `true` 处理，不激活标签页或聚焦窗口；只有显式传入 `background:false` 才会显示并保持该工作区可见。URL 导航在返回成功前会等待目标 URL（或实际重定向 URL）进入稳定完成状态，避免紧接着的 DOM 调用打到旧页面。
+在本机被忽略的 `config/.env` 中设置 `BMG_WORKSPACE_MODE=1` 后，页面定向 MCP 工具会固定到一个 BMG 专属 Edge 窗口／标签页。该窗口仍使用用户现有 Edge 配置，因此继续共享 Cookie、登录态和扩展。sidecar 会把 `windowId`、`tabId`、Win32 `hwnd`、随机 ownership marker、Edge PID／进程启动时间和显隐状态写入 `.state/bmg-workspace.json`。导航始终复用该工作区，公开的 `chrome_close_tabs` 现在会被拒绝，以免误关受管理的工作区标签页；清理网页请暂停播放或导航到其他页面。页面工具的 `background` 语义为后台优先：调用方未指定时按 `true` 处理，不激活标签页或聚焦窗口；只有显式传入 `background:false` 才会显示并保持该工作区可见。URL 导航在返回成功前会等待目标 URL（或实际重定向 URL）进入稳定完成状态，避免紧接着的 DOM 调用打到旧页面。
 
 正式隐藏方式现在是 Windows `ShowWindowAsync(SW_HIDE)`，不再把窗口移动到 `(-32000,-32000)`。首次认领时，BMG 会给目标 HWND 设置进程内 Win32 属性 marker；后续隐藏、显示和 sidecar 重启恢复都必须同时验证 HWND、marker 和 `msedge` 进程身份，已有进程指纹时还会核对 PID／启动时间。无法证明正式 workspace 归属时只退休本地记录，不关闭或修改那个可能已经属于用户的窗口。隐藏操作使用 `SWP_NOMOVE|SWP_NOSIZE`，并验证隐藏前后窗口几何不变；显示操作同样不强制居中或改尺寸；显式调用 `bmg_show_workspace` 默认只显示窗口，不主动抢占焦点；指定 `activate:true`，或对支持后台参数的页面工具显式传入 `background:false`，才会请求前台激活。工具调用如果在临时显示后因 upstream transport 错误失败，sidecar 也会 best-effort 把 ownership-verified workspace 恢复为 true-hidden，避免留下可见任务栏项；隐藏维护失败不会覆盖原始浏览器错误或成功结果。
 

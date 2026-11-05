@@ -5,6 +5,7 @@ import { randomInt } from 'node:crypto';
 const STATE_VERSION = 2;
 const STARTUP_STATE_VERSION = 1;
 const STARTUP_STATE_CLAIM_GRACE_MS = 30 * 1000;
+export const WORKSPACE_RECOVERY_TIMEOUT_MS = 60_000;
 const TARGET_TOOLS = new Set([
   'performance_start_trace',
   'performance_stop_trace',
@@ -692,20 +693,22 @@ export class BrowserWorkspaceRouter {
     if (!this.enabled || payload?.method !== 'tools/call') return payload;
     const name = payload.params?.name;
     if (typeof name !== 'string') return payload;
+    // Public tab closing must never retire the managed workspace anchor tab.
+    // Internal idle cleanup closes only extra tabs through callTool directly.
+    if (name === 'chrome_close_tabs') {
+      throw new Error('BMG workspace tab is protected from closing. Pause playback or navigate the tab away instead.');
+    }
     this.markActivity();
     const isFlowTool = name.startsWith(FLOW_TOOL_PREFIX);
     if (
       name === 'get_windows_and_tabs' ||
-      !isFlowTool && !TARGET_TOOLS.has(name) && name !== 'chrome_close_tabs'
+      !isFlowTool && !TARGET_TOOLS.has(name)
     ) {
       return payload;
     }
     const workspace = await this.ensureWorkspace({ context: { source, tool: name } });
     const args = { ...(payload.params?.arguments || {}) };
-    if (name === 'chrome_close_tabs') {
-      delete args.url;
-      args.tabIds = [workspace.tabId];
-    } else if (isFlowTool) {
+    if (isFlowTool) {
       args.__bmg_workspace_tab_id = workspace.tabId;
       args.__bmg_workspace_window_id = workspace.windowId;
     } else {
@@ -779,10 +782,6 @@ export class BrowserWorkspaceRouter {
         this.hwnd,
         this.visible,
       );
-    } else if (name === 'chrome_close_tabs') {
-      const data = parseToolData(message);
-      if (data?.success === true) this.reset();
-      return;
     }
     if (
       (TARGET_TOOLS.has(name) || isFlowTool) &&
