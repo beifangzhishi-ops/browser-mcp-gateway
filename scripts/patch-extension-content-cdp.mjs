@@ -291,24 +291,52 @@ function patchInteractionFallback(text) {
 
   const readPagePattern = /          yield this\.injectContentScript\(\r?\n            tab\.id,\r?\n            \["inject-scripts\/accessibility-tree-helper\.js"\],\r?\n            false,\r?\n            "ISOLATED",\r?\n            true\r?\n          \);\r?\n          const resp = yield this\.sendMessageToTab\(tab\.id, \{\r?\n            action: TOOL_MESSAGE_TYPES\.GENERATE_ACCESSIBILITY_TREE,\r?\n            filter: filter \|\| null,\r?\n            depth: requestedDepth,\r?\n            refId: focusRefId \|\| void 0\r?\n          \}\);/gu;
   const readPageReplacement = `          let resp = null;
+          let bmgTreePhase = "inject";
           try {
             yield bmgFastPromise(
-              this.injectContentScript(tab.id, ["inject-scripts/accessibility-tree-helper.js"], false, "ISOLATED", true),
-              "read page accessibility injection",
-              1200
-            );
-            resp = yield bmgFastPromise(
-              this.sendMessageToTab(tab.id, {
-                action: TOOL_MESSAGE_TYPES.GENERATE_ACCESSIBILITY_TREE,
-                filter: filter || null,
-                depth: requestedDepth,
-                refId: focusRefId || void 0
+              chrome.scripting.executeScript({
+                target: { tabId: tab.id, allFrames: true },
+                files: ["inject-scripts/accessibility-tree-helper.js"],
+                world: "ISOLATED"
               }),
-              "read page accessibility helper",
-              1200
+              "read page accessibility injection",
+              6000
             );
+            bmgTreePhase = "evaluate";
+            const bmgTreeExecution = yield bmgFastPromise(
+              chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                world: "ISOLATED",
+                func: (requestedFilter, maxDepth, targetRef) => {
+                  if (typeof window.__generateAccessibilityTree !== "function") {
+                    return { success: false, error: "Accessibility tree helper unavailable" };
+                  }
+                  try {
+                    const result = window.__generateAccessibilityTree(requestedFilter, {
+                      maxDepth, refId: targetRef
+                    });
+                    return result && !result.error
+                      ? { success: true, ...result }
+                      : { success: false, error: "Accessibility tree generation failed" };
+                  } catch (_) {
+                    return { success: false, error: "Accessibility tree generation failed" };
+                  }
+                },
+                args: [filter || null, requestedDepth ?? null, focusRefId || null]
+              }),
+              "read page accessibility evaluation",
+              6000
+            );
+            resp = Array.isArray(bmgTreeExecution) && bmgTreeExecution[0]
+              ? bmgTreeExecution[0].result : null;
+            if (!resp || resp.success !== true) {
+              resp = { success: false, error: "BMG accessibility evaluation failed" };
+            }
           } catch (error) {
-            console.warn("BMG read_page accessibility helper unavailable; using interactive/CDP fallback", error);
+            const failureKind = error && typeof error.message === "string" && error.message.includes("timed out")
+              ? "timeout" : "failed";
+            console.warn("BMG read_page accessibility failed", bmgTreePhase, failureKind);
+            resp = { success: false, error: "BMG accessibility " + bmgTreePhase + " " + failureKind };
           }`;
   next = replacePatternExactlyOnce(next, readPagePattern, readPageReplacement, 'read page accessibility helper');
 

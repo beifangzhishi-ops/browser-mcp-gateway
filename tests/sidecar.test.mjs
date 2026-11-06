@@ -1538,7 +1538,14 @@ test('content CDP fallback patch is deterministic and wired into setup', () => {
   assert.match(background, /bmgInteractiveWithCdpFallback/u);
   assert.match(background, /bmgCdpClickSelector/u);
   assert.match(background, /bmgCdpFillSelector/u);
-  assert.match(background, /read page accessibility helper/u);
+  const readStart = background.indexOf('  class ReadPageTool extends BaseBrowserToolExecutor {');
+  const readEnd = background.indexOf('  const readPageTool = new ReadPageTool();', readStart);
+  assert.ok(readStart >= 0 && readEnd > readStart);
+  const readPageBlock = background.slice(readStart, readEnd);
+  assert.match(readPageBlock, /read page accessibility evaluation/u);
+  assert.match(readPageBlock, /func: \(requestedFilter, maxDepth, targetRef\) =>/u);
+  assert.match(readPageBlock, /window\.__generateAccessibilityTree\(requestedFilter/u);
+  assert.doesNotMatch(readPageBlock, /this\.sendMessageToTab\(tab\.id, \{\s*action: TOOL_MESSAGE_TYPES\.GENERATE_ACCESSIBILITY_TREE/u);
   assert.match(background, /Runtime\.evaluate/u);
   const second = patchContentCdpBackgroundText(background);
   assert.equal(second.changed, false);

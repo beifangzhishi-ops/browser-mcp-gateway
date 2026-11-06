@@ -1,14 +1,19 @@
 [CmdletBinding()]
 param(
     [Alias("Proxy")]
-    [string]$NpmProxy = ""
+    [string]$NpmProxy = "",
+    [switch]$ExtensionOnly,
+    [switch]$Stage
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $cacheDir = Join-Path $repoRoot ".cache"
-$extensionDir = Join-Path $repoRoot "extension"
+if ($Stage -and -not $ExtensionOnly) {
+    throw "-Stage requires -ExtensionOnly."
+}
+$extensionDir = if ($Stage) { Join-Path $cacheDir "extension-staged" } else { Join-Path $repoRoot "extension" }
 $extensionZip = Join-Path $cacheDir "chrome-mcp-server-1.0.0.zip"
 
 $upstreamRepo = "hangwin/mcp-chrome"
@@ -80,9 +85,9 @@ function Set-NpmProxyEnvironment([string]$ProxyUri) {
 }
 
 Write-Output "Checking prerequisites..."
-$gh = Require-Command "gh.exe"
 $node = Require-Command "node.exe"
-$npm = Require-Command "npm.cmd"
+$gh = if ($ExtensionOnly) { $null } else { Require-Command "gh.exe" }
+$npm = if ($ExtensionOnly) { $null } else { Require-Command "npm.cmd" }
 
 $nodeVersionText = (& $node.Source --version).Trim()
 $nodeVersion = [version](($nodeVersionText.TrimStart('v') -split '-')[0])
@@ -90,15 +95,16 @@ if ($nodeVersion.Major -lt 20) {
     throw "Node.js 20+ is required. Current version: $nodeVersionText"
 }
 Write-Output "Node.js: $nodeVersionText"
-if ($nodeVersion.Major -ge 24) {
+if (-not $ExtensionOnly -and $nodeVersion.Major -ge 24) {
     Write-Warning "mcp-chrome-bridge@1.0.31 resolves better-sqlite3 11.x, which may compile from source on Node.js 24. If npm install fails on native build prerequisites, use Node.js 22 for this pinned bridge or install the required C++ build toolchain."
 }
 
-Write-Output "Checking GitHub CLI authentication..."
-& $gh.Source auth status
-if ($LASTEXITCODE -ne 0) {
-    throw "GitHub CLI is not authenticated. Run 'gh auth login' first."
-}
+if (-not $ExtensionOnly) {
+    Write-Output "Checking GitHub CLI authentication..."
+    & $gh.Source auth status
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub CLI is not authenticated. Run 'gh auth login' first."
+    }
 
 Write-Output "Installing mcp-chrome-bridge@$bridgeVersion globally..."
 $npmProxy = Get-NpmProxy
@@ -121,8 +127,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "npm install failed. GitHub traffic uses gh, but npm still needs access to registry.npmjs.org."
 }
 
-Write-Output "Registering mcp-chrome Native Messaging directly for Microsoft Edge..."
-& (Join-Path $PSScriptRoot "register-edge.ps1")
+    Write-Output "Registering mcp-chrome Native Messaging directly for Microsoft Edge..."
+    & (Join-Path $PSScriptRoot "register-edge.ps1")
+}
 
 New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
 $downloadRequired = $true
@@ -132,6 +139,9 @@ if (Test-Path -LiteralPath $extensionZip) {
 }
 
 if ($downloadRequired) {
+    if ($ExtensionOnly) {
+        throw "Pinned extension archive is missing or has the wrong SHA256. Run full setup when offline rebuild is not possible."
+    }
     Write-Output "Downloading upstream extension $extensionTag with gh..."
     Remove-Item -LiteralPath $extensionZip -Force -ErrorAction SilentlyContinue
     & $gh.Source release download $extensionTag --repo $upstreamRepo --pattern $extensionAsset --dir $cacheDir --clobber
@@ -180,8 +190,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Output ""
-Write-Output "Setup complete."
+Write-Output $(if ($Stage) { "Extension staged successfully; live extension was not changed." } else { "Setup complete." })
 Write-Output "Upstream reference commit: $upstreamCommit"
+if ($Stage) {
+    Write-Output "Staged extension directory: $extensionDir"
+    Write-Output "Live extension has not been deployed or reloaded."
+    return
+}
 Write-Output ""
 Write-Output "Next steps:"
 Write-Output "  1. Open Edge normally."
