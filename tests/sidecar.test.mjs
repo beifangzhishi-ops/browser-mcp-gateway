@@ -463,6 +463,21 @@ test('本机 tool-call 需要本机密钥并通过共享 MCP 会话执行', asyn
     assert.equal(shown.json.result.foreground, foreground);
   }
   assert.deepEqual(showRequests, [{}, { activate: true }]);
+  fixture.runtime.workspace.getWorkspaceStatus = async () => ({
+    available: true, visibility: 'hidden', foreground: false, maximized: false, minimized: false,
+  });
+  const beforeStatus = fixture.fakeUpstream.calls.length;
+  const status = await requestJson(fixture.baseUrl, '/internal/tool-call', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-BMG-Local-Secret': APPROVAL_SECRET,
+    },
+    body: JSON.stringify({ name: 'bmg_workspace_status', arguments: {} }),
+  });
+  assert.equal(status.response.status, 200);
+  assert.equal(status.json.result.visibility, 'hidden');
+  assert.equal(fixture.fakeUpstream.calls.length, beforeStatus);
 });
 
 test('启动检查初始化共享会话、合并并发请求并重建已关闭工作区', async (t) => {
@@ -2310,6 +2325,9 @@ test('workspace Win32 helpers true-hide only ownership-verified HWNDs without mo
   assert.match(script, /WM_CLOSE/u);
   assert.match(script, /\[switch\]\$Retire/u);
   assert.match(script, /ShowWindowAsync\(\$target, 0\).*SW_HIDE/u);
+  assert.match(script, /IsZoomed\(IntPtr hWnd\)/u);
+  assert.match(script, /GetForegroundWindow\(\)/u);
+  assert.match(script, /maximized = \[BmgWorkspaceWin32\]::IsZoomed\(\$Hwnd\)/u);
   assert.match(script, /SWP_NOMOVE/u);
   assert.match(script, /SWP_NOSIZE/u);
   assert.match(script, /Multiple Edge windows matched/u);
@@ -2422,7 +2440,7 @@ test('工作区先确认隐藏再改样式，并仅对归属确认的窗口清�
   assert.match(helper, /Marshal.FinalReleaseComObject/u);
 });
 
-test('workspace returns to hidden mode after normal browser work resumes', async (t) => {
+test('explicitly displayed workspace stays shown until explicitly hidden', async (t) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-workspace-visible-test-'));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
   const stateFile = path.join(rootDir, 'workspace.json');
@@ -2468,15 +2486,22 @@ test('workspace returns to hidden mode after normal browser work resumes', async
     { method: 'tools/call', params: { name: 'chrome_navigate' } },
     workspaceToolMessage({ success: true, windowId: 9501, tabId: 9502 }),
   );
-  assert.deepEqual(transitions, [['show', 9503, false], ['hide', 9503], ['show', 9503, true], ['hide', 9503]]);
-  assert.equal(router.visible, false);
+  assert.deepEqual(transitions, [['show', 9503, false], ['hide', 9503], ['show', 9503, true]]);
+  assert.equal(router.visible, true);
+  const read = await router.rewrite({
+    method: 'tools/call', params: { name: 'chrome_read_page', arguments: {} },
+  });
+  assert.equal(read.params.arguments.background, true);
+  await router.settleToolCall(read, workspaceToolMessage({ success: true }));
+  assert.equal(router.visible, true);
 
   const hidden = await router.hideWorkspace();
   assert.equal(hidden.visible, false);
+  assert.equal(router.explicitlyVisible, false);
   assert.ok(visibilityEvents.some((event) => event.phase === 'command' && event.reason === 'explicit-hide'));
   assert.ok(visibilityEvents.some((event) => event.phase === 'command-result' && event.action === 'hide' && event.outcome === 'success'));
   assert.ok(visibilityEvents.some((event) => event.phase === 'command' && event.reason === 'explicit-show' && event.activate === true));
-  assert.ok(visibilityEvents.some((event) => event.phase === 'request' && event.reason === 'page-settle'));
+  assert.ok(!visibilityEvents.some((event) => event.phase === 'request' && event.reason === 'page-settle'));
   assert.ok(visibilityEvents.some((event) => event.phase === 'result' && event.reason === 'explicit-hide'));
   assert.deepEqual(transitions[0], ['show', 9503, false]);
   assert.ok(transitions.length >= 3);
@@ -2488,10 +2513,38 @@ test('workspace returns to hidden mode after normal browser work resumes', async
   );
 });
 
-test('workspace local MCP tools expose only explicit show and hide controls', () => {
+test('workspace status is read-only and fails closed on stale ownership', async () => {
+  let inspected = 0;
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    inspectWindow: async () => {
+      inspected += 1;
+      return {
+        marker: 900, processId: 123, processStartTimeUtc: '2026-11-10T00:00:00Z',
+        visible: false, maximized: true, foreground: false, minimized: false,
+      };
+    },
+    callTool: async () => { throw new Error('status must not contact upstream'); },
+    recoverBrowser: async () => { throw new Error('status must not recover Edge'); },
+  });
+  assert.deepEqual(await router.getWorkspaceStatus(), { available: false, visibility: 'unknown' });
+  assert.equal(inspected, 0);
+  router.hwnd = 456;
+  router.windowMarker = 900;
+  router.processId = 123;
+  router.processStartTimeUtc = '2026-11-10T00:00:00Z';
+  assert.deepEqual(await router.getWorkspaceStatus(), {
+    available: true, visibility: 'hidden', foreground: false, maximized: true, minimized: false,
+  });
+  assert.equal(router.visible, false);
+  router.processId = 124;
+  assert.deepEqual(await router.getWorkspaceStatus(), { available: false, visibility: 'unknown' });
+});
+
+test('workspace local MCP tools expose show, hide and passive status controls', () => {
   assert.deepEqual(
     workspaceLocalToolsForTest.map((tool) => tool.name),
-    ['bmg_show_workspace', 'bmg_hide_workspace'],
+    ['bmg_show_workspace', 'bmg_hide_workspace', 'bmg_workspace_status'],
   );
   assert.deepEqual(workspaceLocalToolsForTest[0].inputSchema, {
     type: 'object',
@@ -2504,12 +2557,16 @@ test('workspace local MCP tools expose only explicit show and hide controls', ()
     },
     additionalProperties: false,
   });
-  assert.match(workspaceLocalToolsForTest[0].description, /Showing a window is NOT the same as activating/u);
+  assert.match(workspaceLocalToolsForTest[0].description, /SHOW is distinct from FOREGROUND/u);
   assert.match(workspaceLocalToolsForTest[0].description, /activate=true/u);
   assert.match(workspaceLocalToolsForTest[0].inputSchema.properties.activate.description, /default/u);
   assert.deepEqual(workspaceLocalToolsForTest[1].inputSchema, {
     type: 'object', properties: {}, additionalProperties: false,
   });
+  assert.deepEqual(workspaceLocalToolsForTest[2].inputSchema, {
+    type: 'object', properties: {}, additionalProperties: false,
+  });
+  assert.match(workspaceLocalToolsForTest[2].description, /Read-only/u);
 });
 
 test('workspace tool list adds login guidance only to chrome_read_page', () => {
@@ -2532,7 +2589,7 @@ test('workspace tool list adds login guidance only to chrome_read_page', () => {
   const augmented = augmentWorkspaceToolsForTest(response, true);
   const tools = parseSse(augmented.body.toString('utf8')).result.tools;
   assert.deepEqual(tools.map((tool) => tool.name), [
-    'chrome_read_page', 'chrome_computer', 'flow.sign-in', 'bmg_show_workspace', 'bmg_hide_workspace',
+    'chrome_read_page', 'chrome_computer', 'flow.sign-in', 'bmg_show_workspace', 'bmg_hide_workspace', 'bmg_workspace_status',
     'bmg_claim_web_unlock', 'bmg_unlock', 'approval_status', 'get_approval_status',
     'request_approval', 'resolve_pending_action',
   ]);
@@ -2540,6 +2597,7 @@ test('workspace tool list adds login guidance only to chrome_read_page', () => {
   assert.match(tools[0].description, /优先使用验证码登录/u);
   assert.match(tools[0].description, /CCM/u);
   assert.match(tools[0].description, /savePng=true/u);
+  assert.match(tools[0].description, /call bmg_hide_workspace immediately/u);
   assert.match(tools[0].description, /填写并点击发送/u);
   assert.equal(tools[0].inputSchema.properties.approval_id.type, 'string');
   assert.equal(tools[1].inputSchema.properties.approval_id.type, 'string');

@@ -42,6 +42,8 @@ public static class BmgWorkspaceWin32 {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -99,6 +101,8 @@ function Get-BmgWindowInfo([IntPtr]$Hwnd) {
         processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString("o")
         visible = [BmgWorkspaceWin32]::IsWindowVisible($Hwnd)
         minimized = [BmgWorkspaceWin32]::IsIconic($Hwnd)
+        maximized = [BmgWorkspaceWin32]::IsZoomed($Hwnd)
+        foreground = ([BmgWorkspaceWin32]::GetForegroundWindow() -eq $Hwnd)
         left = $rect.Left
         top = $rect.Top
         right = $rect.Right

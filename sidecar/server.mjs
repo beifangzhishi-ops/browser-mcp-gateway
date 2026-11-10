@@ -73,7 +73,7 @@ const WORKSPACE_LOCAL_TOOLS = [
   {
     name: 'bmg_show_workspace',
     description:
-      'Make the dedicated BMG Edge workspace window visible on the desktop and taskbar. Showing a window is NOT the same as activating/focusing it: by default (activate=false) leave the user\'s current foreground window and keyboard focus alone. Only when the user explicitly requests bringing BMG to the front, switching to it, or focusing it, set activate=true. For login, QR scan, CAPTCHA, or manual verification use the requested visibility/focus behavior. Only the ownership-verified BMG window is affected.',
+      'Show the ownership-verified BMG Edge workspace on desktop and taskbar, retaining visibility until an explicit bmg_hide_workspace. SHOW is distinct from FOREGROUND and MAXIMIZE. Default activate=false: do not steal focus or resize. For a user request about foreground or maximization, first call bmg_workspace_status. If hidden, tell the user and ask before revealing it; do NOT automatically show it. If already visible, activate=true can request foreground but cannot maximize. For temporary login, QR scanning or manual interaction, keep the window shown until the user finishes, then call bmg_hide_workspace immediately and continue background work. If the user explicitly requests show, do not automatically hide it during later page reads.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -89,7 +89,13 @@ const WORKSPACE_LOCAL_TOOLS = [
   {
     name: 'bmg_hide_workspace',
     description:
-      'Make the dedicated BMG Edge workspace window truly hidden again, including its taskbar entry. This changes visibility, not which other window has keyboard focus. Only the ownership-verified BMG window is affected.',
+      'Truly hide the ownership-verified BMG workspace from the desktop and taskbar without closing Edge or tabs or moving/resizing the window. HIDE is not MINIMIZE. This is the default when no user interaction is needed. After temporary browser login, QR scanning or manual verification, hide promptly after the user finishes, before resuming background work. Never hide during a pending manual step, or undo a user-requested display without their instruction. The taskbar API result is not an independent visual confirmation of Explorer.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'bmg_workspace_status',
+    description:
+      'Read-only inspection of the previously owned BMG Edge window: visibility (visible/hidden/unknown), foreground, maximized and minimized. Does not show, hide, activate, resize, launch/recover Edge or alter workspace state. Call before handling a request for foreground or maximization. If hidden, explain that foreground or maximizing a hidden window is not useful to the user and ask whether to display it first; never silently reveal it. Maximization is different from foreground activation; BMG currently has no maximize control tool. If state is unknown, do not guess.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
@@ -97,6 +103,8 @@ const WORKSPACE_ADDITIONAL_TOOLS = [
   ...WORKSPACE_LOCAL_TOOLS,
 ];
 const WORKSPACE_LOCAL_TOOL_NAMES = new Set(WORKSPACE_LOCAL_TOOLS.map((tool) => tool.name));
+const WORKSPACE_INTERACTION_GUIDANCE =
+  'For QR login and other manual browser verification, show BMG only if the user must interact with the real window. Keep it visible throughout that manual step, then call bmg_hide_workspace immediately once the user confirms completion or login success is confirmed, and continue the original task in the background. Do not hide while waiting for the user. When a CAPTCHA screenshot alone suffices, leave the window hidden. A user explicitly asking to show the window is different: keep it visible until told to hide. For foreground or maximize requests first call bmg_workspace_status; if hidden, ask before showing. Foreground activation does not maximize.';
 const READ_PAGE_LOGIN_GUIDANCE =
   '遇到登录页面时优先使用验证码登录。图形验证码通过 BMG 截图保存图片（savePng=true、storeBase64=false），由 CCM 发布给用户识别；短信验证码先向用户获取手机号，由模型填写并点击发送，再向用户索取收到的验证码并填写登录。模型自行完成其余可执行的操作，登录后继续原任务。';
 
@@ -835,7 +843,7 @@ function augmentWorkspaceTools(upstreamResponse, enabled) {
   const existing = new Set(message.result.tools.map((tool) => tool?.name));
   message.result.tools = [
     ...message.result.tools.map((tool) => enabled && tool?.name === 'chrome_read_page'
-      ? { ...tool, description: `${tool.description}\n${READ_PAGE_LOGIN_GUIDANCE}` }
+      ? { ...tool, description: `${tool.description}\n${READ_PAGE_LOGIN_GUIDANCE}\n${WORKSPACE_INTERACTION_GUIDANCE}` }
       : tool),
     ...(enabled ? WORKSPACE_ADDITIONAL_TOOLS.filter((tool) => !existing.has(tool.name)) : []),
   ];
@@ -868,12 +876,17 @@ function hostSessionFor(payload) {
   return value == null || value === '' ? null : String(value);
 }
 
+async function runWorkspaceLocalTool(runtime, name, args = {}) {
+  if (name === 'bmg_workspace_status') return runtime.workspace.getWorkspaceStatus();
+  if (name === 'bmg_show_workspace') return runtime.workspace.showWorkspace(args);
+  if (name === 'bmg_hide_workspace') return runtime.workspace.hideWorkspace();
+  throw new Error('Unknown workspace tool.');
+}
+
 async function executeApprovedBrowserTool(runtime, name, args, headers, url) {
   if (runtime.workspace?.enabled && WORKSPACE_LOCAL_TOOL_NAMES.has(name)) {
     try {
-      const data = name === 'bmg_show_workspace'
-        ? await runtime.workspace.showWorkspace(args)
-        : await runtime.workspace.hideWorkspace();
+      const data = await runWorkspaceLocalTool(runtime, name, args);
       return { content: [{ type: 'text', text: JSON.stringify({ success: true, ...data }) }] };
     } catch (error) {
       runtime.diagnostics.record('approved_owner_tool_failed', {
@@ -979,10 +992,7 @@ async function handleWorkspaceLocalTool(response, payload, runtime) {
   const name = payload?.params?.name;
   if (!WORKSPACE_LOCAL_TOOL_NAMES.has(name)) return false;
   try {
-    const result =
-      name === 'bmg_show_workspace'
-        ? await runtime.workspace.showWorkspace(payload?.params?.arguments)
-        : await runtime.workspace.hideWorkspace();
+    const result = await runWorkspaceLocalTool(runtime, name, payload?.params?.arguments);
     sendLocalToolResult(response, payload, { success: true, ...result }, false, runtime.upstreamSession.sessionId);
   } catch (error) {
     sendLocalToolResult(
@@ -1436,10 +1446,11 @@ async function ensureWorkspaceReady(runtime, { revalidate = false, source = 'loc
 }
 
 async function callWorkspaceTool(runtime, name, args = {}) {
+  // Read-only status must not initialize upstream or recover an absent workspace.
+  if (name === 'bmg_workspace_status') return runWorkspaceLocalTool(runtime, name, args);
   await ensureWorkspaceReady(runtime);
   if (WORKSPACE_LOCAL_TOOL_NAMES.has(name)) {
-    if (name === 'bmg_show_workspace') return runtime.workspace.showWorkspace(args);
-    return runtime.workspace.hideWorkspace();
+    return runWorkspaceLocalTool(runtime, name, args);
   }
   const payload = {
     jsonrpc: '2.0',

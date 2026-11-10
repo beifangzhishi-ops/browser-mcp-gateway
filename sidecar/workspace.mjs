@@ -215,6 +215,8 @@ export class BrowserWorkspaceRouter {
     this.processId = state?.processId || null;
     this.processStartTimeUtc = state?.processStartTimeUtc || null;
     this.visible = state?.visible === true;
+    // Preserve an explicitly visible workspace until an explicit hide.
+    this.explicitlyVisible = this.visible;
     this.validated = false;
     this.initializing = null;
     if (this.windowId && this.tabId) this.scheduleIdleCleanup();
@@ -403,6 +405,7 @@ export class BrowserWorkspaceRouter {
     this.processId = null;
     this.processStartTimeUtc = null;
     this.visible = false;
+    this.explicitlyVisible = false;
     this.validated = false;
     removeState(this.stateFile);
   }
@@ -640,6 +643,34 @@ export class BrowserWorkspaceRouter {
   }
 
 
+  async getWorkspaceStatus() {
+    // Inspect the remembered HWND without ensureWorkspace or browser recovery.
+    if (!this.enabled || !this.hwnd || !this.windowMarker) {
+      return { available: false, visibility: 'unknown' };
+    }
+    try {
+      const info = await this.inspectWindow(this.hwnd, this.windowMarker);
+      if (info?.marker !== this.windowMarker || typeof info?.visible !== 'boolean') {
+        return { available: false, visibility: 'unknown' };
+      }
+      if (this.processId && info.processId !== this.processId) {
+        return { available: false, visibility: 'unknown' };
+      }
+      if (this.processStartTimeUtc && info.processStartTimeUtc !== this.processStartTimeUtc) {
+        return { available: false, visibility: 'unknown' };
+      }
+      return {
+        available: true,
+        visibility: info.visible ? 'visible' : 'hidden',
+        foreground: info.foreground === true,
+        maximized: info.maximized === true,
+        minimized: info.minimized === true,
+      };
+    } catch {
+      return { available: false, visibility: 'unknown' };
+    }
+  }
+
   async showWorkspace({ activate = false } = {}) {
     this.recordWindowTransition({ phase: 'command', action: 'show', reason: 'explicit-show', activate });
     try {
@@ -651,6 +682,7 @@ export class BrowserWorkspaceRouter {
       const result = await this.showWindow(workspace.hwnd, this.windowMarker, activate, 'explicit-show');
       this.updateWindowIdentity(result);
       this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, true);
+      this.explicitlyVisible = true;
       this.recordWindowTransition({ phase: 'command-result', action: 'show', outcome: 'success' });
       return { ...workspace, visible: true, foreground: result?.foreground === true };
     } catch (error) {
@@ -672,6 +704,7 @@ export class BrowserWorkspaceRouter {
       const result = await this.ensureWindowHidden(workspace.hwnd, this.windowMarker, 'explicit-hide');
       this.updateWindowIdentity(result);
       this.remember(workspace.windowId, workspace.tabId, workspace.hwnd, false);
+      this.explicitlyVisible = false;
       this.recordWindowTransition({ phase: 'command-result', action: 'hide', outcome: 'success' });
       return { ...workspace, visible: false, hidden: result?.hidden !== false };
     } catch (error) {
@@ -734,7 +767,7 @@ export class BrowserWorkspaceRouter {
         const shown = await this.showWindow(this.hwnd, this.windowMarker, true, 'element-picker');
         this.updateWindowIdentity(shown);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, true);
-      } else if (backgroundRequested && this.visible && this.hwnd && this.windowMarker) {
+      } else if (backgroundRequested && this.visible && !this.explicitlyVisible && this.hwnd && this.windowMarker) {
         const hidden = await this.ensureWindowHidden(this.hwnd, this.windowMarker, 'page-background');
         this.updateWindowIdentity(hidden);
         this.remember(workspace.windowId, workspace.tabId, this.hwnd, false);
@@ -760,6 +793,7 @@ export class BrowserWorkspaceRouter {
       if (
         (TARGET_TOOLS.has(name) || isFlowTool) &&
         this.visible &&
+        !this.explicitlyVisible &&
         this.hwnd &&
         this.windowMarker
       ) {
@@ -791,7 +825,7 @@ export class BrowserWorkspaceRouter {
       const keepVisible =
         BACKGROUND_TOOLS.has(name) &&
         payload.params?.arguments?.background === false;
-      if (keepVisible) {
+      if (keepVisible || this.explicitlyVisible) {
         this.remember(this.windowId, this.tabId, this.hwnd, true);
         return;
       }

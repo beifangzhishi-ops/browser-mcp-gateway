@@ -143,6 +143,16 @@ export async function checkLiveService() {
     return false;
   }
 
+  const status = callBmgctl(['call', 'bmg_workspace_status', '--args-base64', 'e30=']);
+  const window = status.payload?.result;
+  report('passive owned window status', status.ok && status.payload?.success === true
+    && window?.available === true
+    && (window?.visibility === 'visible' || window?.visibility === 'hidden')
+    && typeof window.foreground === 'boolean'
+    && typeof window.maximized === 'boolean'
+    && typeof window.minimized === 'boolean',
+  status.ok ? window?.visibility || 'unknown' : 'status_tool_failed');
+
   const cases = [
     { name: 'chrome_get_web_content textContent=true', tool: 'chrome_get_web_content', args: { textContent: true }, tree: false },
     { name: 'chrome_read_page defaults (primary accessibility tree)', tool: 'chrome_read_page', args: {}, tree: true },
