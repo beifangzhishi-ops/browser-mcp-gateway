@@ -330,13 +330,20 @@ function patchInteractionFallback(text) {
             resp = Array.isArray(bmgTreeExecution) && bmgTreeExecution[0]
               ? bmgTreeExecution[0].result : null;
             if (!resp || resp.success !== true) {
-              resp = { success: false, error: "BMG accessibility evaluation failed" };
+              // Stable diagnostic codes flow through the existing error and
+              // fallback reason fields. Never return the raw exception, URL,
+              // page content, or any injected function's error details.
+              const failure = resp && resp.error === "Accessibility tree helper unavailable"
+                ? "helper_missing"
+                : resp && resp.error === "Accessibility tree generation failed"
+                  ? "generator_failed" : "evaluate_bad_result";
+              resp = { success: false, error: "BMG accessibility " + failure };
             }
           } catch (error) {
             const failureKind = error && typeof error.message === "string" && error.message.includes("timed out")
               ? "timeout" : "failed";
             console.warn("BMG read_page accessibility failed", bmgTreePhase, failureKind);
-            resp = { success: false, error: "BMG accessibility " + bmgTreePhase + " " + failureKind };
+            resp = { success: false, error: "BMG accessibility " + bmgTreePhase + "_" + failureKind };
           }`;
   next = replacePatternExactlyOnce(next, readPagePattern, readPageReplacement, 'read page accessibility helper');
 

@@ -1561,6 +1561,12 @@ test('content CDP fallback patch is deterministic and wired into setup', () => {
   assert.match(readPageBlock, /func: \(requestedFilter, maxDepth, targetRef\) =>/u);
   assert.match(readPageBlock, /window\.__generateAccessibilityTree\(requestedFilter/u);
   assert.doesNotMatch(readPageBlock, /this\.sendMessageToTab\(tab\.id, \{\s*action: TOOL_MESSAGE_TYPES\.GENERATE_ACCESSIBILITY_TREE/u);
+  const patchSource = readTextFile('scripts/patch-extension-content-cdp.mjs');
+  for (const failureKind of ['helper_missing', 'generator_failed', 'evaluate_bad_result']) {
+    assert.ok(patchSource.includes(failureKind), `accessibility diagnostic missing: ${failureKind}`);
+  }
+  assert.match(patchSource, /bmgTreePhase \+ "_" \+ failureKind/u);
+  assert.doesNotMatch(patchSource, /error\.message\s*\+\s*"BMG accessibility"/u);
   assert.match(background, /Runtime\.evaluate/u);
   const second = patchContentCdpBackgroundText(background);
   assert.equal(second.changed, false);
