@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import vm from 'node:vm';
 import { createHash, randomBytes } from 'node:crypto';
 import { createBmgServer, closeBmgServer, listenBmgServer, workspaceLocalToolsForTest, augmentWorkspaceToolsForTest } from '../sidecar/server.mjs';
 import { UpstreamDiagnostics, probeTcpPort } from '../sidecar/upstream-diagnostics.mjs';
@@ -1569,8 +1570,31 @@ test('content CDP fallback patch is deterministic and wired into setup', () => {
   assert.doesNotMatch(patchSource, /error\.message\s*\+\s*"BMG accessibility"/u);
   assert.match(background, /Runtime\.evaluate/u);
   const second = patchContentCdpBackgroundText(background);
-  assert.equal(second.changed, false);
-  assert.equal(second.text, background);
+  const marker = 'BMG_READ_PAGE_RUNTIME_PROBE_V1';
+  assert.match(second.text, /BMG_READ_PAGE_RUNTIME_PROBE_V1/u);
+  const generatedStart = second.text.indexOf('  class ReadPageTool extends BaseBrowserToolExecutor {');
+  const generatedEnd = second.text.indexOf('  const readPageTool = new ReadPageTool();', generatedStart);
+  const generatedFingerprint = createHash('sha256')
+    .update(second.text.slice(generatedStart, generatedEnd)).digest('hex');
+  assert.match(second.text, new RegExp('const bmgReadPageFingerprint = "' + generatedFingerprint + '";'));
+  let listener;
+  const probeStart = second.text.indexOf('  // ' + marker);
+  const probeEnd = second.text.indexOf('  class CDPHelper', probeStart);
+  assert.ok(probeStart >= 0 && probeEnd > probeStart);
+  vm.runInNewContext(second.text.slice(probeStart, probeEnd), {
+    chrome: { runtime: { onMessage: { addListener(value) { listener = value; } } } },
+    Date, Math,
+  });
+  let runtimeReceipt;
+  listener({ type: 'bmg-read-page-runtime-probe-v1' }, {}, value => { runtimeReceipt = value; });
+  assert.equal(runtimeReceipt.readPageFingerprint, generatedFingerprint);
+  assert.match(runtimeReceipt.workerInstance, /.+/u);
+  runtimeReceipt = null;
+  listener({ type: 'unrelated' }, {}, value => { runtimeReceipt = value; });
+  assert.equal(runtimeReceipt, null);
+  const third = patchContentCdpBackgroundText(second.text);
+  assert.equal(third.changed, false);
+  assert.equal(third.text, second.text);
   const setup = readTextFile('scripts/setup.ps1');
   assert.match(setup, /patch-extension-content-cdp\.mjs/u);
 });

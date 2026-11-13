@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const MARKER = 'BMG_CDP_CONTENT_FALLBACK_V1';
 const INTERACTION_MARKER = 'BMG_CDP_INTERACTION_FALLBACK_V1';
+const RUNTIME_PROBE_MARKER = 'BMG_READ_PAGE_RUNTIME_PROBE_V1';
 const CLASS_ANCHOR = '  class WebFetcherTool extends BaseBrowserToolExecutor {';
 const CLICK_CLASS_ANCHOR = '  class ClickTool extends BaseBrowserToolExecutor {';
 
@@ -463,6 +465,38 @@ export function patchContentCdpBackgroundText(text) {
   const interaction = patchInteractionFallback(next);
   next = interaction.text;
   changed = changed || interaction.changed;
+  if (!next.includes(RUNTIME_PROBE_MARKER)) {
+    const readStart = next.indexOf('  class ReadPageTool extends BaseBrowserToolExecutor {');
+    const readEnd = next.indexOf('  const readPageTool = new ReadPageTool();', readStart);
+    if (readStart < 0 || readEnd <= readStart) {
+      throw new Error('read-page build fingerprint source was not found');
+    }
+    // Fingerprint the generated read-page implementation, not the extension
+    // manifest version or the disk path. The runtime reports this exact
+    // embedded value from the active service worker.
+    const fingerprint = createHash('sha256')
+      .update(next.slice(readStart, readEnd))
+      .digest('hex');
+    const probe = `
+  // ${RUNTIME_PROBE_MARKER}
+  const bmgReadPageFingerprint = "${fingerprint}";
+  const bmgReadPageWorkerInstance = Date.now().toString(36) + "-" + Math.random().toString(16).slice(2);
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || message.type !== "bmg-read-page-runtime-probe-v1") return false;
+    sendResponse({
+      readPageFingerprint: bmgReadPageFingerprint,
+      workerInstance: bmgReadPageWorkerInstance
+    });
+    return false;
+  });`;
+    next = replaceExactlyOnce(
+      next,
+      '  const readPageTool = new ReadPageTool();',
+      '  const readPageTool = new ReadPageTool();' + probe,
+      'read-page runtime probe',
+    );
+    changed = true;
+  }
   return { text: next, changed };
 }
 
