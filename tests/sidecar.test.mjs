@@ -1777,12 +1777,72 @@ test('workspace request performs finite browser recovery and claims the recovere
     params: { name: 'chrome_screenshot', arguments: { fullPage: false } },
   });
   assert.equal(recoveryCalls, 1);
-  assert.deepEqual(calls, ['chrome_navigate', 'get_windows_and_tabs']);
+  assert.deepEqual(calls, ['chrome_navigate', 'get_windows_and_tabs', 'get_windows_and_tabs']);
   assert.equal(rewritten.params.arguments.windowId, 9701);
   assert.equal(rewritten.params.arguments.tabId, 9702);
   assert.equal(rewritten.params.arguments.background, true);
   assert.equal(rewritten.params.arguments.savePng, false);
   assert.equal(rewritten.params.arguments.storeBase64, true);
+});
+
+test('online extension reconciles a closed bootstrap without launching another Edge process', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bmg-closed-bootstrap-recovery-'));
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const startupStateFile = path.join(rootDir, 'bootstrap.json');
+  fs.writeFileSync(startupStateFile, JSON.stringify({
+    version: 1, nonce: 'startup-closed', windowMarker: 1104, createdAtMs: 1000,
+  }));
+  const launches = [];
+  const calls = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    stateFile: path.join(rootDir, 'workspace.json'),
+    startupStateFile,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    clock: () => 50000,
+    recoveryDelaysMs: [0],
+    recoverBrowser: async (options) => {
+      launches.push(options);
+      // The no-launch helper confirms the saved nonce is absent and retires
+      // only that state, not another browser window or Edge process.
+      fs.unlinkSync(startupStateFile);
+    },
+    claimWindow: async (_nonce, marker) => ({ hwnd: 1103, marker, visible: false }),
+    callTool: async (name, args) => {
+      calls.push(name);
+      if (name === 'get_windows_and_tabs') return workspaceToolMessage({ windows: [] });
+      if (name === 'chrome_navigate') {
+        assert.equal(args.newWindow, true);
+        assert.equal(args.background, true);
+        return workspaceToolMessage({ success: true, windowId: 1101, tabs: [{ tabId: 1102 }] });
+      }
+      assert.fail('Unexpected tool ' + name);
+    },
+  });
+  const workspace = await router.ensureWorkspace();
+  assert.equal(workspace.windowId, 1101);
+  assert.equal(workspace.visible, false);
+  assert.deepEqual(launches, [{ launchIfNeeded: false }]);
+  assert.deepEqual(calls, ['get_windows_and_tabs', 'get_windows_and_tabs', 'chrome_navigate']);
+  assert.equal(fs.existsSync(startupStateFile), false);
+});
+
+test('reachable 12306 does not cause an OS Edge launch when MCP sessions are temporarily rejected', async () => {
+  const recoveryCalls = [];
+  const events = [];
+  const router = new BrowserWorkspaceRouter({
+    enabled: true,
+    bootstrapUrl: 'http://127.0.0.1:12307/workspace-bootstrap',
+    recoveryDelaysMs: [0],
+    probeBrowserTransport: async () => true,
+    callTool: async () => { throw new Error('synthetic session temporarily rejected'); },
+    recoverBrowser: async (options) => { recoveryCalls.push(options); },
+    onRecoveryEvent: (name, details) => events.push([name, details]),
+  });
+  await assert.rejects(() => router.ensureWorkspace(), /synthetic session temporarily rejected/u);
+  assert.deepEqual(recoveryCalls, [{ launchIfNeeded: false }]);
+  assert.equal(events.find(([name]) => name === 'workspace_recovery_started')?.[1].mode, 'extension-online');
+  assert.equal(events.find(([name]) => name === 'workspace_recovery_exhausted')?.[1].error_code, 'OTHER');
 });
 
 test('workspace idle timeout keeps one hidden blank BMG tab', async (t) => {
@@ -2426,7 +2486,7 @@ test('workspace transitions record command intent, Win32 results, taskbar API an
   assert.deepEqual(events.slice(2).map((event) => event.phase), ['request', 'result']);
   assert.equal(events[3].outcome, 'error');
   assert.equal(events[3].activate, true);
-  assert.equal(events[3].error, 'synthetic window failure');
+  assert.equal(events[3].error_code, 'OTHER');
   const errors = [];
   const logFailureRouter = new BrowserWorkspaceRouter({
     onWindowTransition: () => { throw new Error('disk unavailable'); },
@@ -2779,6 +2839,10 @@ test('navigation patch keeps BMG browser work background-first and waits for set
   assert.match(background, /BMG_NAVIGATION_SETTLE_V2/u);
   assert.match(background, /BMG_EXPLICIT_TARGET_NAVIGATION_V1/u);
   assert.match(background, /BMG_SAFE_NAVIGATION_URL_PATTERNS_V1/u);
+  // Check the maintained patch output even if the currently loaded extension
+  // cannot be reloaded because its owned tab is on a nonblank user page.
+  const candidate = patchNavigationBackgroundText(background).text;
+  assert.match(candidate, /BMG_BOOTSTRAP_MINIMIZED_V1/u);
   assert.doesNotMatch(background, /BMG_SAFE_URL_PATTERN_HOSTS_V1/u);
   assert.match(background, /if \(!tab\) return false;\s*const current = tab\.url \|\| "";\s*if \(current === expectedUrl\) return true;\s*if \(tab\.status !== "complete"\) return false;/u);
   assert.match(background, /background: background2 = true/u);
@@ -2786,13 +2850,31 @@ test('navigation patch keeps BMG browser work background-first and waits for set
   assert.match(background, /bmgWaitForNavigation\(\s*explicitTab\.id, url, previousUrl/u);
   assert.match(background, /bmgWaitForNavigation\(newTab\.id, url/u);
   assert.match(background, /focused: background2 === true \? false : true/u);
+  const start = candidate.indexOf('            const createWindowOptions = {');
+  const end = candidate.indexOf(
+    '            const newWindow2 = yield chrome.windows.create(createWindowOptions);',
+    start,
+  );
+  assert.ok(start > 0 && end > start);
+  const chooseWindowOptions = vm.runInNewContext(
+    '(url, background2, width, height) => {' + candidate.slice(start, end) +
+      ' return createWindowOptions; }',
+  );
+  const bootstrapUrl = 'http://127.0.0.1:18007/workspace-bootstrap?nonce=startup-safe';
+  const bootstrapOptions = chooseWindowOptions(bootstrapUrl, true);
+  assert.equal(bootstrapOptions.state, 'minimized');
+  assert.equal(bootstrapOptions.focused, false);
+  assert.equal(chooseWindowOptions('https://example.org/', true).state, undefined);
+  assert.equal(chooseWindowOptions(bootstrapUrl, false).state, undefined);
+  assert.equal(chooseWindowOptions(bootstrapUrl, true, 960).state, undefined);
+  assert.equal(chooseWindowOptions(bootstrapUrl.replace('18007', '12306'), true).state, undefined);
   assert.doesNotMatch(
     background,
     /const \{ url, type, jsScript, tabId, windowId, background: background2 \} = args;/u,
   );
-  const second = patchNavigationBackgroundText(background);
+  const second = patchNavigationBackgroundText(candidate);
   assert.equal(second.changed, false);
-  assert.equal(second.text, background);
+  assert.equal(second.text, candidate);
 
   const setup = readTextFile('scripts/setup.ps1');
   assert.match(setup, /patch-extension-navigation\.mjs/u);

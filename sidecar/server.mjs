@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadConfig } from './config.mjs';
 import { BrowserWorkspaceRouter, WORKSPACE_RECOVERY_TIMEOUT_MS } from './workspace.mjs';
-import { UpstreamDiagnostics } from './upstream-diagnostics.mjs';
+import { UpstreamDiagnostics, probeTcpPort } from './upstream-diagnostics.mjs';
 import {
   BmgApprovalGate,
   addApprovalToTools,
@@ -682,13 +682,14 @@ async function showWorkspaceWindow(rootDir, hwnd, marker, activate = false) {
   return parseWindowHelperResult(result.stdout);
 }
 
-async function ensureWorkspaceBrowser(rootDir, port, startupStateFile) {
+async function ensureWorkspaceBrowser(rootDir, port, startupStateFile, { launchIfNeeded = true } = {}) {
   const script = path.join(rootDir, 'scripts', 'ensure-edge.ps1');
   const result = await execFileAsync(
     'powershell.exe',
     [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
       '-Port', String(port), '-BootstrapStateFile', startupStateFile,
+      ...(!launchIfNeeded ? ['-NoLaunch'] : []),
     ],
     { cwd: rootDir, windowsHide: true, timeout: WORKSPACE_RECOVERY_TIMEOUT_MS },
   );
@@ -1675,12 +1676,18 @@ export function createBmgServer(options = {}) {
       ensureWorkspaceWindowHidden(config.rootDir, hwnd, marker),
     showWindow: (hwnd, marker, activate) => showWorkspaceWindow(config.rootDir, hwnd, marker, activate),
     recoverBrowser: options.workspaceRecoverBrowser === undefined
-      ? () => ensureWorkspaceBrowser(
+      ? (options) => ensureWorkspaceBrowser(
           config.rootDir,
           config.port,
           path.join(path.dirname(config.workspaceStateFile), 'bmg-edge-bootstrap.json'),
+          options,
         )
       : options.workspaceRecoverBrowser,
+    probeBrowserTransport: options.workspaceProbeBrowserTransport === undefined
+      ? async () => (await probeTcpPort({
+          host: '127.0.0.1', port: 12306, timeoutMs: 1500,
+        })).state === 'up'
+      : options.workspaceProbeBrowserTransport,
     callTool: (name, args) => runtime.upstreamSession.callTool(name, args),
   });
   const server = http.createServer((request, response) => {

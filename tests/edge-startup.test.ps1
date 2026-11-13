@@ -34,6 +34,11 @@ if ([int]$bootstrap.version -ne 1 -or [string]::IsNullOrWhiteSpace($bootstrap.no
 & $invoke
 if ($script:starts.Count -ne 1) { throw "An active bootstrap claim must suppress duplicate recovery windows." }
 
+# An online extension can ask to reconcile stale startup state but must never
+# cause Start-Process to open a second Edge window.
+& { . $entry -Port 18007 -BootstrapStateFile $stateFile -NoLaunch -SkipInitialHide }
+if ($script:starts.Count -ne 1) { throw "NoLaunch must not start Edge." }
+
 $entryText = Get-Content -LiteralPath $entry -Raw
 if ($entryText -notmatch '"-Retire"' -or $entryText -notmatch 'action=retire') {
     throw "Stale bootstrap recovery must retire the owned window before replacement."

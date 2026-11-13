@@ -6,6 +6,7 @@ const DEFAULT_BACKGROUND_MARKER = 'BMG_DEFAULT_BACKGROUND_V1';
 const NAVIGATION_SETTLE_MARKER = 'BMG_NAVIGATION_SETTLE_V2';
 const NAVIGATION_TARGET_MARKER = 'BMG_EXPLICIT_TARGET_NAVIGATION_V1';
 const SAFE_URL_PATTERN_MARKER = 'BMG_SAFE_NAVIGATION_URL_PATTERNS_V1';
+const BOOTSTRAP_MINIMIZED_MARKER = 'BMG_BOOTSTRAP_MINIMIZED_V1';
 
 function lines(values) {
   return values.join('\n');
@@ -434,13 +435,36 @@ function patchNavigationSettle(text) {
   return { text: next, changed: true };
 }
 
+function patchBootstrapMinimizedWindow(text) {
+  if (text.includes(BOOTSTRAP_MINIMIZED_MARKER)) return { text, changed: false };
+  return {
+    text: replaceExactlyOnce(
+      text,
+      '            const newWindow2 = yield chrome.windows.create(createWindowOptions);',
+      lines([
+        '            // ' + BOOTSTRAP_MINIMIZED_MARKER,
+        '            // Only the internal BMG bootstrap, never arbitrary new browser windows.',
+        '            if (background2 === true &&',
+        '                /^http:\\/\\/127\\.0\\.0\\.1:18007\\/workspace-bootstrap\\?nonce=[A-Za-z0-9._-]+$/.test(url) &&',
+        '                createWindowOptions.width === void 0 && createWindowOptions.height === void 0) {',
+        '              createWindowOptions.state = "minimized";',
+        '            }',
+        '            const newWindow2 = yield chrome.windows.create(createWindowOptions);',
+      ]),
+      'BMG minimized bootstrap window',
+    ),
+    changed: true,
+  };
+}
+
 export function patchNavigationBackgroundText(text) {
   const background = patchDefaultBackground(text);
   const target = patchNavigationTargetSelection(background.text);
   const navigation = patchNavigationSettle(target.text);
+  const bootstrap = patchBootstrapMinimizedWindow(navigation.text);
   return {
-    text: navigation.text,
-    changed: background.changed || target.changed || navigation.changed,
+    text: bootstrap.text,
+    changed: background.changed || target.changed || navigation.changed || bootstrap.changed,
   };
 }
 

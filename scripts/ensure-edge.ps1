@@ -2,7 +2,8 @@
 param(
     [int]$Port = 18007,
     [string]$BootstrapStateFile = "",
-    [switch]$SkipInitialHide
+    [switch]$SkipInitialHide,
+    [switch]$NoLaunch
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,6 +79,13 @@ if (Test-Path -LiteralPath $BootstrapStateFile) {
         if ($existingBootstrap -and $validBootstrap) { throw }
         Remove-Item -LiteralPath $BootstrapStateFile -Force -ErrorAction SilentlyContinue
     }
+}
+
+if ($NoLaunch) {
+    # The extension is connected: only reconcile an existing pending nonce.
+    # Never launch a second Edge window to repair a lost BMG-owned HWND.
+    Write-Output "BMG bootstrap action=skip-online"
+    return
 }
 
 $nonce = "startup-" + [Guid]::NewGuid().ToString("N")

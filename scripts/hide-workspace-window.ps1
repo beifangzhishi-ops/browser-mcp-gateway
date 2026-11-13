@@ -124,23 +124,28 @@ do {
         $titleMatches = [System.Collections.Generic.List[System.IntPtr]]::new()
         [BmgWorkspaceWin32]::EnumWindows({
             param([IntPtr]$hWnd, [IntPtr]$lParam)
-            [uint32]$processId = 0
-            [void][BmgWorkspaceWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
-            try { $process = Get-Process -Id $processId -ErrorAction Stop } catch { return $true }
-            if ($process.ProcessName -ne 'msedge') { return $true }
+            # Checking every HWND with Get-Process makes the short nonce search
+            # take tens of seconds on busy desktops. Filter by a cheap Win32
+            # marker/title first; verify the Edge process only for candidates.
             $marker = [int64][BmgWorkspaceWin32]::GetProp($hWnd, $propertyName)
-            if ($marker -eq $WindowMarker) {
-                $markerMatches.Add($hWnd)
-                return $true
+            $isMarkerMatch = $marker -eq $WindowMarker
+            $isTitleMatch = $false
+            if (-not $isMarkerMatch) {
+                $title = [System.Text.StringBuilder]::new(1024)
+                [void][BmgWorkspaceWin32]::GetWindowText($hWnd, $title, $title.Capacity)
+                $windowTitle = $title.ToString()
+                $isTitleMatch = (
+                    [string]::Equals($windowTitle, $needle, [StringComparison]::Ordinal) -or
+                    $windowTitle.StartsWith($needle + " - ", [StringComparison]::Ordinal)
+                )
             }
-            $title = [System.Text.StringBuilder]::new(1024)
-            [void][BmgWorkspaceWin32]::GetWindowText($hWnd, $title, $title.Capacity)
-            $windowTitle = $title.ToString()
-            if (
-                [string]::Equals($windowTitle, $needle, [StringComparison]::Ordinal) -or
-                $windowTitle.StartsWith($needle + " - ", [StringComparison]::Ordinal)
-            ) {
-                $titleMatches.Add($hWnd)
+            if ($isMarkerMatch -or $isTitleMatch) {
+                [uint32]$processId = 0
+                [void][BmgWorkspaceWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
+                try { $process = Get-Process -Id $processId -ErrorAction Stop } catch { return $true }
+                if ($process.ProcessName -ne 'msedge') { return $true }
+                if ($isMarkerMatch) { $markerMatches.Add($hWnd) }
+                else { $titleMatches.Add($hWnd) }
             }
             return $true
         }, [IntPtr]::Zero) | Out-Null
@@ -188,8 +193,13 @@ do {
             exit 0
         }
         if ([BmgWorkspaceWin32]::IsIconic($target)) {
+            # The BMG bootstrap can be created minimized, but it must finish
+            # hidden and non-minimized. Hide first, then queue a non-activating
+            # unminimize immediately followed by SW_HIDE (no visible hold).
+            [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
             [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 4) # SW_SHOWNOACTIVATE
-            Start-Sleep -Milliseconds 80
+            [void][BmgWorkspaceWin32]::ShowWindowAsync($target, 0) # SW_HIDE
+            Start-Sleep -Milliseconds 30
         }
         $before = Get-BmgWindowInfo $target
         # 必须先隐藏并等待生效，再改变任务栏样式；反序会留下 Shell 条目。

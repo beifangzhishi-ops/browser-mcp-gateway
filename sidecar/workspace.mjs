@@ -79,6 +79,22 @@ function toolResultIsError(message) {
   return outer?.data?.isError === true;
 }
 
+function recoveryErrorCode(error) {
+  const code = error?.code;
+  if (typeof code === 'string' && /^(?:ECONNREFUSED|ETIMEDOUT|ECONNRESET|ENOENT|EPERM|EACCES)$/u.test(code)) {
+    return code;
+  }
+  const message = typeof error?.message === 'string' ? error.message : '';
+  if (/startup bootstrap is stale/u.test(message)) return 'STARTUP_STALE';
+  if (/startup Edge window is not visible/u.test(message)) return 'STARTUP_PENDING';
+  if (/no longer exists/u.test(message)) return 'WINDOW_DISAPPEARED';
+  if (/ownership|marker|Multiple browser tabs|Multiple Edge windows/u.test(message)) return 'OWNERSHIP_REJECTED';
+  if (/Timed out|timeout|timed out/u.test(message)) return 'HELPER_TIMEOUT';
+  if (/could not enumerate browser windows/u.test(message)) return 'EXTENSION_ENUMERATION_FAILED';
+  if (/could not be created|invalid response|upstream tool returned an error/u.test(message)) return 'EXTENSION_TOOL_FAILED';
+  return 'OTHER';
+}
+
 function loadState(file) {
   if (!file || !fs.existsSync(file)) return null;
   try {
@@ -165,6 +181,7 @@ export class BrowserWorkspaceRouter {
     ensureWindowHidden = async () => {},
     showWindow = async () => {},
     recoverBrowser = null,
+    probeBrowserTransport = null,
     onRecoveryEvent = null,
     recoveryDelaysMs = [1000, 2500, 5000],
     wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
@@ -188,6 +205,8 @@ export class BrowserWorkspaceRouter {
     this.showWindow = (hwnd, marker, activate = false, reason = 'maintenance') =>
       this.transitionWindow('show', reason, hwnd, activate, () => showWindow(hwnd, marker, activate));
     this.recoverBrowser = typeof recoverBrowser === 'function' ? recoverBrowser : null;
+    this.probeBrowserTransport = typeof probeBrowserTransport === 'function'
+      ? probeBrowserTransport : null;
     this.onRecoveryEvent = typeof onRecoveryEvent === 'function' ? onRecoveryEvent : null;
     this.recoveryDelaysMs = Array.isArray(recoveryDelaysMs)
       ? recoveryDelaysMs.map(Number).filter((delay) => Number.isFinite(delay) && delay >= 0)
@@ -233,6 +252,7 @@ export class BrowserWorkspaceRouter {
 
   async transitionWindow(action, reason, hwnd, activate, operation) {
     const sequence = ++this.windowTransitionSequence;
+    const startedAt = Date.now();
     const common = { sequence, action, reason, hwnd, windowId: this.windowId, activate };
     this.recordWindowTransition({ ...common, phase: 'request' });
     try {
@@ -249,12 +269,14 @@ export class BrowserWorkspaceRouter {
         taskbarApi: result?.taskbarApi ?? null,
         taskbarApiSucceeded: result?.taskbarApiSucceeded === true ? true : null,
         taskbarUiStatus: 'not_verified',
+        duration_ms: Date.now() - startedAt,
       });
       return result;
     } catch (error) {
       this.recordWindowTransition({
         ...common, phase: 'result', outcome: 'error',
-        error: String(error?.message || error),
+        error_code: recoveryErrorCode(error),
+        duration_ms: Date.now() - startedAt,
       });
       throw error;
     }
@@ -582,6 +604,15 @@ export class BrowserWorkspaceRouter {
     return this.createWorkspace();
   }
 
+  async upstreamWindowsAvailable() {
+    try {
+      const result = await this.callTool('get_windows_and_tabs', {});
+      return !toolResultIsError(result) && Array.isArray(parseToolData(result)?.windows);
+    } catch {
+      return false;
+    }
+  }
+
   async prepareWorkspaceWithRecovery(context = null) {
     try {
       return await this.prepareWorkspaceOnce();
@@ -592,14 +623,33 @@ export class BrowserWorkspaceRouter {
       this.logger?.log?.(`BMG workspace recovery start source=${source}${tool}.`);
       const evidence = { source: ['local-control', 'external-mcp', 'workspace'].includes(source)
         ? source : 'other' };
-      this.onRecoveryEvent?.('workspace_recovery_started', evidence);
+      const upstreamReady = await this.upstreamWindowsAvailable();
+      // A TCP listener with an initializing/temporarily rejected MCP session
+      // must not be mistaken for an absent Edge process.
+      let transportReady = upstreamReady;
+      if (!transportReady && this.probeBrowserTransport) {
+        try { transportReady = await this.probeBrowserTransport() === true; }
+        catch { transportReady = false; }
+      }
+      const mode = transportReady ? 'extension-online' : 'browser-bootstrap';
+      const recoveryEvidence = { ...evidence, mode };
+      this.onRecoveryEvent?.('workspace_recovery_started', {
+        ...recoveryEvidence, error_code: recoveryErrorCode(firstError),
+      });
+      const bootstrapStartedAt = Date.now();
       try {
-        await this.recoverBrowser();
-        this.onRecoveryEvent?.('workspace_bootstrap_completed', evidence);
+        // A lost HWND is not an offline browser. The no-launch path only
+        // retires a verified stale startup nonce, allowing the connected
+        // extension to create the next BMG window in the background.
+        await this.recoverBrowser({ launchIfNeeded: !transportReady });
+        this.onRecoveryEvent?.(
+          transportReady ? 'workspace_bootstrap_skipped' : 'workspace_bootstrap_completed',
+          { ...recoveryEvidence, duration_ms: Date.now() - bootstrapStartedAt },
+        );
       } catch (error) {
         this.onRecoveryEvent?.('workspace_bootstrap_failed', {
-          ...evidence, error_code: typeof error?.code === 'string' && /^[A-Z_0-9]{1,40}$/u.test(error.code)
-            ? error.code : 'UNKNOWN',
+          ...recoveryEvidence, error_code: recoveryErrorCode(error),
+          duration_ms: Date.now() - bootstrapStartedAt,
         });
         throw error;
       }
@@ -609,18 +659,19 @@ export class BrowserWorkspaceRouter {
         try {
           const workspace = await this.prepareWorkspaceOnce();
           this.logger?.log?.(`BMG workspace recovery succeeded source=${source}${tool}.`);
-          this.onRecoveryEvent?.('workspace_recovery_succeeded', { ...evidence, attempt: index + 1 });
+          this.onRecoveryEvent?.('workspace_recovery_succeeded', { ...recoveryEvidence, attempt: index + 1 });
           return workspace;
         } catch (error) {
           lastError = error;
           this.onRecoveryEvent?.('workspace_recovery_retry_failed', {
-            ...evidence, attempt: index + 1,
-            error_code: typeof error?.code === 'string' && /^[A-Z_0-9]{1,40}$/u.test(error.code)
-              ? error.code : 'UNKNOWN',
+            ...recoveryEvidence, attempt: index + 1,
+            error_code: recoveryErrorCode(error),
           });
         }
       }
-      this.onRecoveryEvent?.('workspace_recovery_exhausted', evidence);
+      this.onRecoveryEvent?.('workspace_recovery_exhausted', {
+        ...recoveryEvidence, error_code: recoveryErrorCode(lastError),
+      });
       throw lastError;
     }
   }
