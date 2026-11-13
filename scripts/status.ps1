@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [int]$Port = 12306
+    [int]$Port = 12306,
+    [switch]$IncludeLegacyFunnel
 )
 
 $ErrorActionPreference = "Continue"
@@ -40,18 +41,31 @@ catch {
 $portReady = Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -InformationLevel Quiet -WarningAction SilentlyContinue
 Write-Output "Local MCP port 127.0.0.1:$Port listening: $portReady"
 
-Write-Output ""
-$tailscalePath = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-if (-not (Test-Path -LiteralPath $tailscalePath)) {
-    $tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
-    if ($null -ne $tailscale) {
-        $tailscalePath = $tailscale.Source
+$sidecarReady = Test-NetConnection -ComputerName 127.0.0.1 -Port 18007 -InformationLevel Quiet -WarningAction SilentlyContinue
+Write-Output "Local Sidecar port 127.0.0.1:18007 listening: $sidecarReady"
+if ($sidecarReady) {
+    try {
+        $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18007/health' -TimeoutSec 3 -ErrorAction Stop
+        Write-Output "Local Sidecar health: $($health.status -eq 'ok')"
+    }
+    catch {
+        Write-Output "Local Sidecar health: unavailable"
     }
 }
 
-if (Test-Path -LiteralPath $tailscalePath) {
-    & $tailscalePath funnel status
-}
-else {
-    Write-Output "Tailscale CLI not found."
+if ($IncludeLegacyFunnel) {
+    Write-Output ""
+    $tailscalePath = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+    if (-not (Test-Path -LiteralPath $tailscalePath)) {
+        $tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+        if ($null -ne $tailscale) {
+            $tailscalePath = $tailscale.Source
+        }
+    }
+    if (Test-Path -LiteralPath $tailscalePath) {
+        & $tailscalePath funnel status
+    }
+    else {
+        Write-Output "Tailscale CLI not found."
+    }
 }

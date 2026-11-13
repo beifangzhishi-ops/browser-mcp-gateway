@@ -119,21 +119,9 @@ export async function checkLiveService() {
     return false;
   }
 
-  const resource = health.payload?.resource;
-  if (typeof resource === 'string' && resource.startsWith('https://')) {
-    try {
-      const uri = new URL(resource);
-      const metadata = await fetch(`${uri.origin}/.well-known/oauth-protected-resource${uri.pathname}`, {
-        signal: AbortSignal.timeout(9_000),
-      });
-      report('public OAuth metadata', metadata.status === 200, `HTTP ${metadata.status}`);
-    } catch {
-      report('public OAuth metadata', false, 'request_failed');
-    }
-  } else {
-    report('public OAuth metadata', false, 'invalid_resource_uri');
-  }
-
+  // The current production route is local bmgctl -> loopback Sidecar -> upstream.
+  // OAuth/Funnel identities may remain in configuration for compatibility, but
+  // public HTTPS reachability is not part of the local release acceptance gate.
   const workspace = callBmgctl(['workspace']);
   report('owned BMG workspace', workspace.ok && workspace.payload?.success === true
     && Number.isInteger(workspace.payload?.workspace?.tabId)

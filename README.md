@@ -1,17 +1,17 @@
 # Browser MCP Gateway
 
 
-Windows gateway around [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome) for using an existing Microsoft Edge session from ChatGPT through an OAuth-protected HTTPS endpoint such as Tailscale Funnel.
+Windows gateway around [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome) for automating an existing Microsoft Edge session. **Current production access is local-only:** CCM invokes `bmgctl`, which talks to the loopback BMG Sidecar and upstream bridge. Tailscale Funnel and public ChatGPT MCP access are disabled and are not release prerequisites.
 
-This repository wraps the upstream project, adds Microsoft Edge Native Messaging registration on Windows, and exposes it through an independent local OAuth sidecar.
+This repository wraps the upstream project, adds Microsoft Edge Native Messaging registration on Windows, and routes local automation through an independent loopback Sidecar. Legacy OAuth/public MCP functionality remains in the codebase but is not part of the active access path.
 
 ## ChatGPT plugin icon
 
 The ready-to-upload BMG MCP plugin icon is [`assets/bmg-mcp-icon.png`](assets/bmg-mcp-icon.png) (128 x 128 PNG, 9,183 bytes). Upload this file manually when creating or editing the ChatGPT MCP plugin; the icon upload must stay below 10,000 bytes. It is a static local/repository asset, not an image URL or an MCP endpoint, and does not change the BMG server's public tool schemas.
 
-## Browser MCP approval
+## Legacy public Browser MCP approval (inactive in local-only deployment)
 
-The OAuth-protected public MCP endpoint has a separate BMG Sidecar approval gate before browser dispatch. It covers public upstream tools, dynamic flows, and the BMG show/hide workspace tools. The grant ID is removed before forwarding to the browser. The loopback-only bmgctl local management channel retains its separate local-secret requirement.
+When the optional public OAuth-protected MCP endpoint is deployed, it has a separate BMG Sidecar approval gate before browser dispatch. It covers public upstream tools, dynamic flows, and the BMG show/hide workspace tools. The grant ID is removed before forwarding to the browser. **In the current local-only deployment, CCM uses `bmgctl` and its separate loopback/local-secret channel; no public approval flow, Funnel URL, or phone web unlock is required.** The following public-flow details are retained for code maintenance, not as setup instructions.
 
 BMG adopts the already accepted WCM approval state model with BMG browser-wide scope:
 
@@ -24,13 +24,13 @@ BMG adopts the already accepted WCM approval state model with BMG browser-wide s
 
 One approved approval_id authorizes **all public BMG browser tools** for a limited time (6 hours by default, configurable from 60 seconds to 7 days), not just the owner call. Several IDs may be active independently. Phone-code and webpage grants never run an outstanding frozen action: after claiming a grant, explicitly retry the browser action using its approval_id. A card-approved frozen action runs once and must not be retried. An unbound request expires after 15 minutes. A bound card has a separate 72-hour decision window; the grant starts only when approved. Changing policy revision revokes pending actions, paired-browser privileges, and all grants. Grants and pending actions are memory-only and vanish on Sidecar restart. Bounded archived decision receipts persist 90 days for display only.
 
-### Mobile one-tap web unlock
+### Legacy mobile one-tap web unlock (requires a separately enabled public endpoint)
 
 Bookmark **`https://<your BMG Funnel host>/bmg/unlock`** on your phone. On the first visit from each browser, enter one fresh code from your existing BMG authenticator to pair the browser (the code goes only to this BMG webpage, never into ChatGPT). Once paired, just select a duration from **1 minute to 7 days** (default **6 hours**) and tap **临时解锁 BMG**. Return to ChatGPT and say **“已解锁，继续”**. After explicit permission to use BMG, the model calls **`bmg_claim_web_unlock`** with no arguments, claims exactly one owner-issued grant, and passes that approval_id to subsequent BMG browser calls. The page then returns to a ready state **without revoking the issued grant**. Claiming does not automatically execute a previously frozen browser action.
 
 A freshly issued but unclaimed webpage grant waits **at most 5 minutes**, and overlapping button presses cannot create extra unclaimed grants. A browser pairing lasts at most **90 days** and is revoked by a policy revision; at most eight paired browsers are retained. Pairing tokens are stored only as SHA-256 hashes in ignored `.state/bmg-web-browsers.json`; cookies are `Secure`, `HttpOnly`, and `SameSite=Lax`. The fixed path uses matching unpredictable CSRF cookies and hidden form tokens, with a one-use phone TOTP at initial pairing. Mobile proxies can alter `Origin` / `Referer`, so those headers are not the authorization check; missing or mismatched CSRF/paired-browser cookies fail closed. The page disallows framing and caching. **Protect your paired phone/browser.** This page only works in `either` mode and never disables approval or exposes anonymous unlocking. The user must first have enrolled BMG TOTP locally.
 
-`scripts/configure-funnel.ps1 -Apply` adds the exact `/bmg/unlock` HTTPS route, alongside the existing BMG OAuth paths; it never creates a wildcard public proxy. The matching disable script removes it. Source changes to the web route require a scoped Sidecar restart; the new `bmg_claim_web_unlock` tool also requires a ChatGPT plugin tool-schema refresh. The trusted `node.exe --test tests\sidecar.test.mjs` suite exercises local real-HTTP browser pairing and grant semantics with fake OTP in isolated servers, never production authenticator codes. Run `node.exe scripts\check-bmg-web-unlock-public.mjs` afterward to check the public HTTPS page and reject a missing-cookie POST without using a real code or issuing a grant.
+The disabled public integration historically used `scripts/configure-funnel.ps1 -Apply` to expose an exact-path HTTPS route, and `scripts/disable-funnel.ps1 -Apply` to remove it. **Do not enable these routes or run `scripts/check-bmg-web-unlock-public.mjs` for current local BMG acceptance.** The trusted `node.exe --test tests\sidecar.test.mjs` suite still exercises OAuth/approval and pairing behavior with fake OTP in isolated local test servers; that is a code regression test, not evidence of external availability.
 
 If ChatGPT blocks or redacts a **BMG phone-authenticator approval code**, the model should stop requesting the code and **immediately call `request_approval`** using the already-frozen browser action's `approval_id` in `either` mode. If the intended browser action has not yet produced an ID, first call that browser tool without `approval_id` to create a pending approval, then display its card. The user still approves or denies the card manually. Do not invent IDs or replay card-executed actions. This fallback does not replace website login SMS/CAPTCHA verification, and does not work in `totp`-only mode. The corresponding guidance is present in the MCP tool descriptions and `approval_required` message; changing those descriptions requires ChatGPT BMG **Refresh tools**.
 
@@ -125,17 +125,19 @@ sidecar 只绑定 127.0.0.1:18007，不修改 upstream mcp-chrome 核心实现�
 
 After every maintenance/deployment or restart, verify **the entire live browser chain**, not just the Sidecar `/health` response or unit tests: check Sidecar health and that port 18007 has its expected listener/PID; verify independent port 12306 is LISTENING with a live upstream process and that the Sidecar can reach it; inspect the passive upstream/error diagnostics; confirm `bmgctl workspace` reports the owned workspace; and successfully perform a harmless read-only browser tool call through `bmgctl call` to prove the extension/native messaging/upstream/Sidecar path works. Report each checked layer and any failures. A bound port alone does not establish browser tool health.
 
-**Release gate (all mandatory, no partial-success handoff):** distinguish repository/commit success, Sidecar deployment, both process-backed TCP listeners, OAuth reachability, owned workspace, and real browser tool success. Check nested MCP `result.isError` and content-level failure, not just HTTP status, an outer `success` flag, or the command's ability to print JSON. Test `chrome_get_web_content` (`textContent: true`), `chrome_read_page` (default), and `chrome_read_page` with **explicit `depth: 0`**. Re-run any previously failing tool with its exact original meaningful arguments. Do not silently omit problematic parameters, call a different tool, or count a successful fallback as proof that the original path works. Transient or intermittent failures remain failed until repeat validation confirms recovery. Never use a workspace recovery action to disguise an unhealthy listener.
+**Local release gate (all mandatory, no partial-success handoff):** distinguish repository/commit success, required runtime deployment, both process-backed **loopback** TCP listeners, local Sidecar health, owned workspace, and real `bmgctl` browser tool success. External OAuth metadata, Funnel connectivity and ChatGPT plugin refresh are **not** part of this gate. Check nested MCP `result.isError` and content-level failure, not just HTTP status, an outer `success` flag, or the command's ability to print JSON. Test `chrome_get_web_content` (`textContent: true`), `chrome_read_page` (default), and `chrome_read_page` with **explicit `depth: 0`**. Re-run any previously failing tool with its exact original meaningful arguments. Do not silently omit problematic parameters, call a different tool, or count a successful fallback as proof that the original path works. Transient or intermittent failures remain failed until repeat validation confirms recovery. Never use a workspace recovery action to disguise an unhealthy listener.
 
-If any required check remains failing, skipped, timed out, or unverifiable, classify the release **not delivered / degraded** even if source changes passed tests, were committed, pushed and Sidecar restarted. Clearly state each passed and failed check, the exact outstanding repair and whether a ChatGPT plugin schema refresh is still required. Do not announce completion or ask for a schema refresh as a replacement for repairing browser functionality. Only a post-repair full acceptance pass permits a healthy/completed conclusion.
+If any required **local** check remains failing, skipped, timed out, or unverifiable, classify the release **not delivered / degraded** even if source changes passed tests, were committed, pushed and Sidecar restarted. Clearly state each passed and failed check and the outstanding repair. Do not treat public endpoint availability or a ChatGPT plugin schema refresh as a substitute for repairing local browser functionality. Only a post-repair full local acceptance pass permits a healthy/completed conclusion.
 
-Run the maintained `scripts/check-bmg-live.mjs` live gate on 6v after deployment; it reports only fixed diagnostic categories and never prints browser page content. It exits nonzero if any required listener, OAuth, workspace or tool case fails. The gate explicitly rejects nested MCP tool errors and a `chrome_read_page` response that succeeds **only** through the interactive-elements fallback. Its two accessibility tests must keep both their default-argument and explicit `depth: 0` variants; they cannot be replaced by unrelated content reads. Unit tests validate that error and fallback responses fail this gate, but unit tests cannot replace the actual live run.
+Run the maintained `scripts/check-bmg-live.mjs` live gate on 6v after deployment; it reports only fixed diagnostic categories and never prints browser page content or contact a public endpoint. It exits nonzero if any required local listener, Sidecar health, workspace or browser-tool case fails. The gate explicitly rejects nested MCP tool errors and a `chrome_read_page` response that succeeds **only** through the interactive-elements fallback. Its two accessibility tests must keep both their default-argument and explicit `depth: 0` variants; they cannot be replaced by unrelated content reads. Unit tests validate that error and fallback responses fail this gate, but unit tests cannot replace the actual live run.
 
 稀疏页面的验收：`chrome_read_page` 主树成功但内容较少时，上游会保留主树正文，并补充交互元素。验收仅在 `reason=sparse_tree`、`sparse=true`、补读来源为 `get_interactive_elements`、主树正文非空且节点统计为有效正整数时通过，并明确报告 `primary_tree_with_interactive_supplement`。主树失败、超时或缺少主树证据的备用读取仍然失败；默认参数与显式 `depth: 0` 两项检查均保留。
 
 With CCM's restricted shell, execute the full live gate via the trusted `node.exe --test tests\live-acceptance.test.mjs` runner (on 6v), which allows its child-process checks. A restricted-shell `listener_probe_unavailable` failure indicates an **inconclusive probe**, not proof that port 12306 is absent. Do not use an inconclusive check to declare either success or upstream failure.
 
-**Current validation (2026-11-13): DEGRADED / NOT DELIVERED for idle blank-page reads.** CCM successfully used the ownership-verified hidden BMG anchor tab to enter the installed extension's `options.html` and invoke its own `chrome.runtime.reload()` via existing `chrome_javascript`/CDP, without keyboard/mouse/UIA, a whole-Edge restart, or touching unowned Edge windows. The pinned extension candidate was rebuilt and compared against the running install (81 files; only `background.js` differed); the original bundle was backed up in ignored `.cache`, the staged background was installed, and 12306 briefly dropped and automatically returned with a new PID; 18007 did not restart. The newly installed worker answered its internal build probe, and the extension page recomputed SHA256 over the exact loaded `ReadPageTool` source and compared it to the worker's embedded fingerprint **inside the extension** (boolean match; no hash or page content exposed). The new fixed error classifier returned **`BMG accessibility inject_failed`** for explicit `chrome_read_page(depth:0)` on the owned `about:blank` tab; default reading used fallback-only. With the **same worker**, navigating only that tab to ordinary local `http://127.0.0.1:18007/health` allowed `depth:0` to generate a real primary tree and the complete trusted `tests/live-acceptance.test.mjs` gate to pass, including default primary tree. Restoring the tab to its original `about:blank` state made `depth:0` fail with `inject_failed` again. This is strong direct evidence of the blank-page injection limitation interacting with BMG's eight-hour idle cleanup, not proof of a permanently repaired read tool. The hidden BMG workspace and unrelated Edge windows were preserved; **the release gate is still blocked on the restored blank state**.
+**Local-only validation (2026-11-14):** 56/56 Node unit tests passed. The full read-only `tests/live-acceptance.test.mjs` run also passed, verifying both independent loopback listeners, Sidecar health, the hidden owned workspace, `chrome_get_web_content(textContent:true)`, and primary `chrome_read_page` with both default and explicit `depth:0` arguments, with both listener PIDs unchanged. No public OAuth/Funnel probe or intentional service restart was involved. This is a successful **point-in-time local acceptance**, not proof of permanent recovery on every page or Edge restart. The 2026-11-13 blank-page limitation below remains a historical, separately reproducible case until retested specifically on the idle blank anchor.
+
+**Historical finding (2026-11-13): DEGRADED / NOT DELIVERED for idle blank-page reads at that time.** CCM successfully used the ownership-verified hidden BMG anchor tab to enter the installed extension's `options.html` and invoke its own `chrome.runtime.reload()` via existing `chrome_javascript`/CDP, without keyboard/mouse/UIA, a whole-Edge restart, or touching unowned Edge windows. The pinned extension candidate was rebuilt and compared against the running install (81 files; only `background.js` differed); the original bundle was backed up in ignored `.cache`, the staged background was installed, and 12306 briefly dropped and automatically returned with a new PID; 18007 did not restart. The newly installed worker answered its internal build probe, and the extension page recomputed SHA256 over the exact loaded `ReadPageTool` source and compared it to the worker's embedded fingerprint **inside the extension** (boolean match; no hash or page content exposed). The new fixed error classifier returned **`BMG accessibility inject_failed`** for explicit `chrome_read_page(depth:0)` on the owned `about:blank` tab; default reading used fallback-only. With the **same worker**, navigating only that tab to ordinary local `http://127.0.0.1:18007/health` allowed `depth:0` to generate a real primary tree and the complete trusted `tests/live-acceptance.test.mjs` gate to pass, including default primary tree. Restoring the tab to its original `about:blank` state made `depth:0` fail with `inject_failed` again. This is strong direct evidence of the blank-page injection limitation interacting with BMG's eight-hour idle cleanup, not proof of a permanently repaired read tool. The hidden BMG workspace and unrelated Edge windows were preserved; **the release gate was blocked on the restored blank state in that test**.
 
 **Scoped reload and verification workflow:** `scripts/reload-bmg-extension.ps1` has two actions, `-Action Verify` (checks the active worker and restores the blank anchor) and `-Action Reload` (also triggers the extension's own reload and waits for 12306). Both actions were exercised successfully on 6v on 2026-11-13. They refuse non-hidden, unowned, nonblank or multi-tab workspaces. `Reload` also requires installed `extension/background.js` SHA256 to match the already staged `.cache/extension-staged/background.js`; **the script does not itself overwrite installed source**. Before a new deployment, stage via `scripts/setup.ps1 -ExtensionOnly -Stage`, inspect the candidate, back up the existing live background inside ignored `.cache`, and deploy only the validated changed file. Then execute the scoped reload in CCM:
 
@@ -182,17 +184,12 @@ configure-funnel.ps1 和 disable-funnel.ps1 默认只输出预览；本阶段不
 ## Architecture
 
 ```text
-ChatGPT Web
+CCM on 6v
     |
-    | OAuth + HTTPS / MCP
-    v
-Tailscale Funnel
+    | local bmgctl call (no public HTTP)
     |
     v
-https://your-machine.your-tailnet.ts.net/bmg/mcp
-    |
-    v
-127.0.0.1:18007  BMG OAuth sidecar
+127.0.0.1:18007  BMG Sidecar (local-secret /internal/*)
     |
     | local HTTP proxy
     v
@@ -200,7 +197,7 @@ https://your-machine.your-tailnet.ts.net/bmg/mcp
     |
     | Native Messaging
     v
-Edge extension + normal Edge tabs
+Edge extension + ownership-verified BMG workspace
 ```
 
 sidecar、upstream、Native Messaging 和 Edge extension 分属独立生命周期。登录启动脚本负责在需要时启动 Edge 并准备工作区；sidecar 通过扩展操作已有浏览器，不创建专用浏览器 profile，也不修改 upstream 核心实现。停止 sidecar 保留 Edge 和工作区窗口。
@@ -221,7 +218,7 @@ In workspace mode, BMG appends login and temporary-visibility guidance only to t
 
 `bmg_show_workspace` and `bmg_hide_workspace` are the primary visibility controls. Hiding means Win32 true-hide plus taskbar removal, not minimizing or moving offscreen; it preserves tabs, session and geometry. Showing defaults to non-activating display (`activate=false`), never maximizes, and now remains visible through ordinary background page reads until an explicit hide. A user-requested display is not an automatic temporary display. The new `bmg_workspace_status` public MCP tool reads the previously owned window's actual visibility, foreground, maximized and minimized states using ownership-verified Win32 inspection. Status is read-only: it does **not** initialize upstream, recover Edge, display a window, change focus or edit saved workspace state; a missing/stale window returns `available=false` and `visibility=unknown`. The model must check this before foreground or maximization requests. If the window is hidden, it asks the user before displaying it. Foreground is **not** maximization; BMG does not expose a maximize tool. The public status tool uses the normal BMG approval gate, while local `bmgctl call bmg_workspace_status` stays read-only and does not initialize upstream.
 
-The public tool addition and description changes require ChatGPT BMG **Refresh tools** after Sidecar deployment and full live acceptance. Restarting Sidecar alone cannot update cached ChatGPT tool descriptions.
+If the optional public MCP integration is explicitly re-enabled, public tool additions and description changes require ChatGPT BMG **Refresh tools** after deployment and its own live acceptance. No ChatGPT tool refresh is needed for the active local `bmgctl` route.
 
 ## Requirements
 
@@ -230,7 +227,7 @@ The public tool addition and description changes require ChatGPT BMG **Refresh t
 - Git
 - Node.js 20+; Node.js 22 is the preferred fallback for `mcp-chrome-bridge@1.0.31` if Node.js 24 cannot compile its `better-sqlite3` dependency locally.
 - npm
-- Tailscale with Funnel enabled for this device/tailnet
+- No Tailscale/Funnel dependency for local operation
 
 ## Install
 
@@ -330,20 +327,20 @@ After the extension connects, the upstream MCP endpoint should be:
 http://127.0.0.1:12306/mcp
 ```
 
-## Tailscale Funnel
+## Legacy Tailscale Funnel (not used)
 
-After the Edge extension is connected, local port 12306 is listening, and the sidecar health is 200, use an elevated PowerShell only when a Funnel change is explicitly approved:
+The current BMG does **not** expose its MCP route to the public internet. Do not configure or test Funnel during local setup or acceptance. The following scripts are retained for a separately authorized future public deployment, not routine operation:
 
 ```powershell
 .\scripts\configure-funnel.ps1
 .\scripts\configure-funnel.ps1 -Apply
 ```
 
-The first command is preview-only. The second command applies only the BMG route list. The ChatGPT custom MCP server URL is https://your-machine.your-tailnet.ts.net/bmg/mcp.
+The first command is preview-only. The second command would expose BMG routes publicly and must not be used without explicit authorization. The historical ChatGPT MCP endpoint is not active.
 
-## ChatGPT plugin/app tool refresh
+## Legacy ChatGPT public plugin/app tool refresh (inactive)
 
-After public MCP `tools/list`, tool names, descriptions, or input schemas change, **Refresh tools** in the ChatGPT plugin management panel after confirming the new BMG runtime is healthy. Check that the new tool, such as `bmg_claim_web_unlock`, is actually present. Reconnect only if the refresh control is unavailable or still fails to load the current schema.
+Only if the public MCP integration is explicitly re-enabled: after its `tools/list`, tool names, descriptions, or input schemas change, **Refresh tools** in the ChatGPT plugin management panel after confirming that runtime is healthy. This is not required for current CCM/`bmgctl` changes. Reconnect only if refresh is unavailable or fails.
 
 On this machine, BMG keeps the public resource in:
 
@@ -375,7 +372,7 @@ The printed key is local secret material. Enter it only in the plugin/app OAuth 
 .\scripts\status.ps1
 ```
 
-This checks Node/npm, the installed bridge, Edge Native Messaging registration, local MCP port 12306, and Tailscale Funnel status.
+This checks Node/npm, the installed bridge, Edge Native Messaging registration and local ports 12306/18007 (including a best-effort Sidecar `/health` check). It does not query Funnel by default. The full browser acceptance remains `node.exe --test tests\live-acceptance.test.mjs`, not this status summary.
 
 ## Important security note
 
@@ -482,10 +479,20 @@ node scripts\test-hidden-window.mjs --hidden-only
 - Edge Native Messaging registration on Windows (upstream currently registers Chrome/Chromium only)
 - repeatable installation/version pinning
 - automatic Windows proxy/PAC handoff for setup
-- Tailscale Funnel configuration
+- loopback-only Sidecar integration and workspace isolation
 
 That keeps this repository small and makes upstream updates replaceable instead of maintaining another browser automation implementation.
 
+
+## Edge restart / BMG workspace recovery (2026-11-14)
+
+When the Edge extension and local port 12306 are reachable but the previous BMG-owned window has been closed, workspace recovery now uses the connected extension rather than launching a second OS-level Edge window. A failed or briefly unavailable MCP session is checked against the loopback 12306 TCP listener before an Edge bootstrap is allowed. An expired startup nonce is reconciled via the ownership-checked no-launch helper; unrelated Edge windows remain untouched. Recovery events distinguish the no-launch path from real browser bootstrap and use fixed error categories and durations.
+
+The Win32 nonce window search now filters inexpensive title/marker candidates before asking Windows for process identity. The owned window is still validated by PID, start time, marker, geometry and true-hide state. A no-match helper smoke check on 6v finished in about 0.5 seconds on 2026-11-14; this is not proof of zero taskbar flicker during an actual Edge cold start.
+
+The generated extension candidate additionally sets the **BMG internal bootstrap** window's initial Chrome window state to minimized with focused=false, leaving normal browser windows unchanged. Rebuild it with scripts/setup.ps1 -ExtensionOnly -Stage. The staged background.js must be compared with the live extension, installed and safely reloaded before that change is active. scripts/reload-bmg-extension.ps1 deliberately refuses to replace an owned nonblank user tab; do not bypass that precondition or report a staged patch as deployed. In the 2026-11-14 maintenance session the work area had one nonblank HTTPS tab, so that extension change was built and checked but its live reload was deferred to protect page state.
+
+Use the trusted node.exe --test tests\\sidecar.test.mjs and node.exe --test tests\\live-acceptance.test.mjs entries when verifying through CCM. The latter is the full live gate; standalone node execution from a restricted CCM shell may fail to spawn netstat.exe with EPERM even when both ports are listening. Check the nested browser results, and never label a partially deployed extension repair as complete.
 
 ## License
 
